@@ -1,6 +1,11 @@
 services:
   live-recorder:
-    build: .
+    build:
+      context: .
+      # 本地构建走阿里云源加速（GitHub Actions 不传 args，使用官方源）
+      args:
+        - APT_MIRROR=mirrors.aliyun.com
+        - PIP_INDEX=https://mirrors.aliyun.com/pypi/simple/
     container_name: live-recorder
     restart: unless-stopped
     ports:
