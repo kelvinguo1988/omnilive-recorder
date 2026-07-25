@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>直播录制平台</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='45' fill='%23FE2C55'/><circle cx='50' cy='50' r='20' fill='white'/></svg>">
+</head>
+<body>
+<div id="app">
+    <!-- 侧边栏 -->
+    <aside class="sidebar">
+        <div class="logo">
+            <div class="logo-icon"></div>
+            <span>直播录制</span>
+        </div>
+        <nav>
+            <a class="nav-item active" data-page="dashboard" onclick="switchPage('dashboard')">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+                <span>仪表盘</span>
+            </a>
+            <a class="nav-item" data-page="rooms" onclick="switchPage('rooms')">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+                <span>房间管理</span>
+            </a>
+            <a class="nav-item" data-page="recordings" onclick="switchPage('recordings')">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/></svg>
+                <span>录制记录</span>
+            </a>
+            <a class="nav-item" data-page="files" onclick="switchPage('files')">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                <span>文件管理</span>
+            </a>
+            <a class="nav-item" data-page="settings" onclick="switchPage('settings')">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                <span>系统设置</span>
+            </a>
+        </nav>
+        <div class="sidebar-footer">
+            <div class="status-indicator" id="systemStatus">
+                <span class="dot dot-green"></span>
+                <span>运行中</span>
+            </div>
+        </div>
+    </aside>
+
+    <!-- 主内容区 -->
+    <main class="main-content">
+        <!-- 仪表盘 -->
+        <div id="page-dashboard" class="page active">
+            <header class="page-header">
+                <h1>仪表盘</h1>
+                <button class="btn btn-primary" onclick="refreshDashboard()">刷新</button>
+            </header>
+            <div class="stats-grid" id="dashboardStats">
+                <div class="stat-card">
+                    <div class="stat-icon stat-blue">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+                    </div>
+                    <div class="stat-info">
+                        <div class="stat-value" id="statRooms">-</div>
+                        <div class="stat-label">监控房间</div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon stat-red">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3" fill="currentColor"/></svg>
+                    </div>
+                    <div class="stat-info">
+                        <div class="stat-value" id="statLive">-</div>
+                        <div class="stat-label">正在直播</div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon stat-green">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8" fill="currentColor"/></svg>
+                    </div>
+                    <div class="stat-info">
+                        <div class="stat-value" id="statRecording">-</div>
+                        <div class="stat-label">正在录制</div>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon stat-purple">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                    </div>
+                    <div class="stat-info">
+                        <div class="stat-value" id="statCompleted">-</div>
+                        <div class="stat-label">已完成录制</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="dashboard-row">
+                <div class="card">
+                    <div class="card-header">
+                        <h2>系统资源</h2>
+                    </div>
+                    <div class="card-body" id="systemResources">
+                        <div class="resource-bar">
+                            <div class="resource-label">
+                                <span>CPU 使用率</span>
+                                <span id="cpuPercent">-</span>
+                            </div>
+                            <div class="progress-bar"><div class="progress-fill" id="cpuBar" style="width:0%"></div></div>
+                        </div>
+                        <div class="resource-bar">
+                            <div class="resource-label">
+                                <span>内存使用率</span>
+                                <span id="memPercent">-</span>
+                            </div>
+                            <div class="progress-bar"><div class="progress-fill" id="memBar" style="width:0%"></div></div>
+                        </div>
+                        <div class="resource-bar">
+                            <div class="resource-label">
+                                <span>磁盘使用率</span>
+                                <span id="diskPercent">-</span>
+                            </div>
+                            <div class="progress-bar"><div class="progress-fill" id="diskBar" style="width:0%"></div></div>
+                        </div>
+                        <div class="resource-bar">
+                            <div class="resource-label">
+                                <span>录制文件大小</span>
+                                <span id="recordingSize">-</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <h2>当前录制</h2>
+                    </div>
+                    <div class="card-body" id="activeRecordings">
+                        <div class="empty-state">暂无录制任务</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 房间管理 -->
+        <div id="page-rooms" class="page">
+            <header class="page-header">
+                <h1>房间管理</h1>
+                <button class="btn btn-primary" onclick="showAddRoomModal()">+ 添加房间</button>
+            </header>
+            <div class="card">
+                <div class="card-body">
+                    <table class="data-table" id="roomsTable">
+                        <thead>
+                            <tr>
+                                <th>平台</th>
+                                <th>主播</th>
+                                <th>标题</th>
+                                <th>直播状态</th>
+                                <th>录制状态</th>
+                                <th>最后检测</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="roomsTableBody">
+                            <tr><td colspan="7" class="empty-state">加载中...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- 录制记录 -->
+        <div id="page-recordings" class="page">
+            <header class="page-header">
+                <h1>录制记录</h1>
+                <button class="btn btn-primary" onclick="loadRecordings()">刷新</button>
+            </header>
+            <div class="card">
+                <div class="card-body">
+                    <table class="data-table" id="recordingsTable">
+                        <thead>
+                            <tr>
+                                <th>平台</th>
+                                <th>主播</th>
+                                <th>文件名</th>
+                                <th>大小</th>
+                                <th>时长</th>
+                                <th>状态</th>
+                                <th>开始时间</th>
+                            </tr>
+                        </thead>
+                        <tbody id="recordingsTableBody">
+                            <tr><td colspan="7" class="empty-state">加载中...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- 文件管理 -->
+        <div id="page-files" class="page">
+            <header class="page-header">
+                <h1>文件管理</h1>
+                <div>
+                    <select id="filePlatformFilter" class="select" onchange="loadFiles()">
+                        <option value="">全部平台</option>
+                        <option value="抖音">抖音</option>
+                        <option value="B站">B站</option>
+                        <option value="快手">快手</option>
+                    </select>
+                    <button class="btn btn-primary" onclick="loadFiles()">刷新</button>
+                </div>
+            </header>
+            <div class="card">
+                <div class="card-body">
+                    <table class="data-table" id="filesTable">
+                        <thead>
+                            <tr>
+                                <th>文件名</th>
+                                <th>平台</th>
+                                <th>主播</th>
+                                <th>大小</th>
+                                <th>修改时间</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="filesTableBody">
+                            <tr><td colspan="6" class="empty-state">加载中...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- 系统设置 -->
+        <div id="page-settings" class="page">
+            <header class="page-header">
+                <h1>系统设置</h1>
+            </header>
+            <div class="card">
+                <div class="card-header"><h2>当前配置</h2></div>
+                <div class="card-body" id="settingsInfo">
+                    <div class="setting-row"><span>录制格式</span><span id="cfgFormat">-</span></div>
+                    <div class="setting-row"><span>监控间隔</span><span id="cfgInterval">-</span></div>
+                    <div class="setting-row"><span>分段时长</span><span id="cfgSegment">-</span></div>
+                    <div class="setting-row"><span>输出目录</span><span id="cfgOutput">-</span></div>
+                    <div class="setting-row"><span>支持平台</span><span id="cfgPlatforms">-</span></div>
+                </div>
+            </div>
+            <div class="card" style="margin-top:16px">
+                <div class="card-header"><h2>系统日志</h2></div>
+                <div class="card-body">
+                    <div class="log-container" id="logContainer">
+                        <div class="empty-state">加载中...</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+</div>
+
+<!-- 添加房间弹窗 -->
+<div class="modal-overlay" id="addRoomModal" style="display:none">
+    <div class="modal">
+        <div class="modal-header">
+            <h2>添加直播间</h2>
+            <button class="btn-close" onclick="hideAddRoomModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div class="form-group">
+                <label>直播间地址</label>
+                <input type="text" id="roomUrl" class="input" placeholder="粘贴直播间URL，如 https://live.douyin.com/123456789" oninput="detectPlatform()">
+                <div class="form-hint" id="platformHint">支持抖音、B站、快手 — 自动识别平台</div>
+            </div>
+            <div class="form-group">
+                <label>录制画质</label>
+                <select id="roomQuality" class="select">
+                    <option value="origin">原画</option>
+                    <option value="blue_ray">蓝光</option>
+                    <option value="ultra">超清</option>
+                    <option value="high">高清</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>备注 (可选)</label>
+                <input type="text" id="roomRemark" class="input" placeholder="给这个房间加个备注">
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="hideAddRoomModal()">取消</button>
+            <button class="btn btn-primary" onclick="submitAddRoom()">添加</button>
+        </div>
+    </div>
+</div>
+
+<!-- 视频播放器弹窗 -->
+<div class="modal-overlay" id="playerModal" style="display:none">
+    <div class="modal modal-large">
+        <div class="modal-header">
+            <h2 id="playerTitle">视频播放</h2>
+            <button class="btn-close" onclick="hidePlayer()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <video id="videoPlayer" controls autoplay style="width:100%;max-height:70vh;background:#000"></video>
+        </div>
+    </div>
+</div>
+
+<!-- Toast通知 -->
+<div class="toast-container" id="toastContainer"></div>
+
+<script src="/static/js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# 运行时数据（不入库，容器内由 volume 挂载）
+recordings/
+data/
+logs/
+*.db
+*.sqlite
+*.sqlite3
+
+# 本地配置（含敏感 Cookie，勿提交）
+config/config.local.ini
+.env
+.env.local
+
+# 系统/编辑器
+.DS_Store
+.idea/
+.vscode/
+*.log
+
+# Docker
+.dockerignore
