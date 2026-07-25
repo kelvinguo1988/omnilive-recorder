@@ -84,9 +84,19 @@ async def system_info(db: AsyncSession = Depends(get_db)):
         "active_recordings": len(recorder.active_processes),
         "settings": {
             "record_format": settings.record_format,
-            "monitor_interval": settings.monitor_interval,
+            "video_quality": settings.video_quality,
             "segment_time": settings.segment_time,
+            "max_retries": settings.max_retries,
+            "retry_delay": settings.retry_delay,
+            "monitor_interval": settings.monitor_interval,
+            "check_timeout": settings.check_timeout,
             "output_dir": settings.output_dir,
+            "max_disk_usage": settings.max_disk_usage,
+            "enable_notification": settings.enable_notification,
+            "webhook_url": settings.webhook_url,
+            "enable_proxy": settings.enable_proxy,
+            "proxy_addr": settings.proxy_addr,
+            "douyin_cookie": settings.douyin_cookie,
         },
     }
 

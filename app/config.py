@@ -61,47 +61,65 @@ def get_data_dir(database_url: str = None) -> str:
 CONFIG_PATH: str = os.environ.get("CONFIG_PATH", "/app/config/config.ini")
 
 
+def _get_mapping():
+    """配置字段 -> 类型转换函数"""
+    return {
+        "record_format": str,
+        "video_quality": str,
+        "segment_time": int,
+        "max_retries": int,
+        "retry_delay": int,
+        "monitor_interval": int,
+        "check_timeout": int,
+        "output_dir": str,
+        "max_disk_usage": int,
+        "host": str,
+        "port": int,
+        "enable_notification": lambda x: x.lower() == "true",
+        "webhook_url": str,
+        "enable_proxy": lambda x: x.lower() == "true",
+        "proxy_addr": str,
+        "douyin_cookie": str,
+    }
+
+
+def _apply_ini(config: AppConfig, path: str):
+    """将 INI 文件 DEFAULT 节的值应用到 config 实例（不存在则跳过）"""
+    if not path or not os.path.exists(path):
+        return
+    parser = configparser.ConfigParser()
+    parser.read(path, encoding="utf-8")
+    # DEFAULT 是 configparser 的保留节，parser["DEFAULT"] 始终可用
+    section = parser["DEFAULT"]
+    mapping = _get_mapping()
+    for key, converter in mapping.items():
+        if key in section:
+            try:
+                setattr(config, key, converter(section[key]))
+            except (ValueError, TypeError):
+                pass
+
+
+def _get_runtime_config_path(config: AppConfig) -> str:
+    """运行时配置落盘路径（写入可写的数据目录，避免基础配置目录为只读挂载）
+
+    该文件叠加在基础配置之上，优先生效。
+    """
+    return os.path.join(get_data_dir(config.database_url), "runtime_config.ini")
+
+
 def load_config(config_path: str = None) -> AppConfig:
-    """从INI文件加载配置"""
+    """从INI文件加载配置（基础配置 + 运行时覆盖）"""
     global CONFIG_PATH
     config = AppConfig()
 
     if config_path is None:
         config_path = CONFIG_PATH
 
-    if os.path.exists(config_path):
-        parser = configparser.ConfigParser()
-        parser.read(config_path, encoding="utf-8")
-
-        # DEFAULT 是 configparser 的保留节，parser["DEFAULT"] 始终可用（无需 has_section 判断）
-        section = parser["DEFAULT"]
-
-        mapping = {
-            "record_format": str,
-            "video_quality": str,
-            "segment_time": int,
-            "max_retries": int,
-            "retry_delay": int,
-            "monitor_interval": int,
-            "check_timeout": int,
-            "output_dir": str,
-            "max_disk_usage": int,
-            "host": str,
-            "port": int,
-            "enable_notification": lambda x: x.lower() == "true",
-            "webhook_url": str,
-            "enable_proxy": lambda x: x.lower() == "true",
-            "proxy_addr": str,
-            "douyin_cookie": str,
-        }
-
-        for key, converter in mapping.items():
-            if key in section:
-                try:
-                    value = converter(section[key])
-                    setattr(config, key, value)
-                except (ValueError, TypeError):
-                    pass
+    # 基础配置
+    _apply_ini(config, config_path)
+    # 运行时覆盖（Web 设置页保存的内容，优先于基础配置）
+    _apply_ini(config, _get_runtime_config_path(config))
 
     # 确保输出目录存在
     Path(config.output_dir).mkdir(parents=True, exist_ok=True)
@@ -113,16 +131,16 @@ def load_config(config_path: str = None) -> AppConfig:
     return config
 
 
-def save_config(config: AppConfig = None, config_path: str = None) -> bool:
-    """将配置写回 INI 文件（持久化，重启后依然生效）
+def save_config(config: AppConfig = None) -> bool:
+    """将配置写入运行时配置文件（数据目录，重启后依然生效）
 
+    写入独立的 runtime_config.ini，叠加在基础配置之上，不覆盖只读挂载的基础配置。
     只持久化可通过配置文件管理的字段；数据库URL等运行时派生项不写入。
     """
     if config is None:
         config = settings
-    if config_path is None:
-        config_path = CONFIG_PATH
 
+    config_path = _get_runtime_config_path(config)
     parser = configparser.ConfigParser()
     if os.path.exists(config_path):
         parser.read(config_path, encoding="utf-8")
