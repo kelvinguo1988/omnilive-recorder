@@ -199,14 +199,19 @@
         <div id="page-files" class="page">
             <header class="page-header">
                 <h1>文件管理</h1>
-                <div>
+                <div class="file-toolbar">
                     <select id="filePlatformFilter" class="select" onchange="loadFiles()">
                         <option value="">全部平台</option>
                         <option value="抖音">抖音</option>
                         <option value="B站">B站</option>
                         <option value="快手">快手</option>
                     </select>
+                    <select id="mergeFormat" class="select" title="合并后的封装格式">
+                        <option value="mp4">合并为 MP4</option>
+                        <option value="ts">合并为 TS</option>
+                    </select>
                     <button class="btn btn-primary" onclick="loadFiles()">刷新</button>
+                    <button class="btn btn-secondary" onclick="mergeSelected()" id="mergeBtn" disabled>合并选中 (<span id="selCount">0</span>)</button>
                 </div>
             </header>
             <div class="card">
@@ -214,6 +219,7 @@
                     <table class="data-table" id="filesTable">
                         <thead>
                             <tr>
+                                <th class="col-check"><input type="checkbox" id="selectAll" onchange="toggleSelectAll(this)" title="全选"></th>
                                 <th>文件名</th>
                                 <th>平台</th>
                                 <th>主播</th>
@@ -223,7 +229,7 @@
                             </tr>
                         </thead>
                         <tbody id="filesTableBody">
-                            <tr><td colspan="6" class="empty-state">加载中...</td></tr>
+                            <tr><td colspan="7" class="empty-state">加载中...</td></tr>
                         </tbody>
                     </table>
                 </div>

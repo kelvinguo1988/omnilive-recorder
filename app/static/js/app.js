@@ -286,6 +286,7 @@ async function loadFiles() {
 
         tbody.innerHTML = files.map(f => `
             <tr>
+                <td class="col-check"><input type="checkbox" class="file-check" data-path="${f.path}" onchange="updateMergeBtn()"></td>
                 <td title="${f.name}">${f.name.length > 35 ? f.name.substring(0, 35) + '...' : f.name}</td>
                 <td><span class="platform-tag">${f.platform}</span></td>
                 <td>${f.streamer}</td>
@@ -300,6 +301,11 @@ async function loadFiles() {
                 </td>
             </tr>
         `).join('');
+
+        // 重置选择状态
+        const selAll = document.getElementById('selectAll');
+        if (selAll) selAll.checked = false;
+        updateMergeBtn();
     } catch (e) {
         console.error('Load files error:', e);
     }
@@ -326,6 +332,49 @@ async function deleteFile(path) {
         showToast('删除成功', 'success');
         loadFiles();
     } catch (e) { showToast('删除失败', 'error'); }
+}
+
+// 合并选中文件
+function updateMergeBtn() {
+    const checked = document.querySelectorAll('.file-check:checked');
+    const countEl = document.getElementById('selCount');
+    if (countEl) countEl.textContent = checked.length;
+    const btn = document.getElementById('mergeBtn');
+    if (btn) btn.disabled = checked.length < 2;
+}
+
+function toggleSelectAll(el) {
+    document.querySelectorAll('.file-check').forEach(c => { c.checked = el.checked; });
+    updateMergeBtn();
+}
+
+async function mergeSelected() {
+    const checked = [...document.querySelectorAll('.file-check:checked')];
+    if (checked.length < 2) { showToast('请至少选择 2 个文件', 'error'); return; }
+
+    const file_paths = checked.map(c => c.dataset.path);
+    const output_format = document.getElementById('mergeFormat').value;
+    const btn = document.getElementById('mergeBtn');
+    const prevHtml = btn.innerHTML;
+    btn.disabled = true;
+    btn.textContent = '合并中...';
+
+    try {
+        const res = await API.post('/api/files/merge', { file_paths, output_format });
+        if (res.success) {
+            showToast(`合并成功：${res.output_name}（${res.file_size_mb} MB，${res.input_count} 个文件）`, 'success');
+            loadFiles();
+            return;
+        }
+        showToast(res.detail || res.error || '合并失败', 'error');
+    } catch (e) {
+        const msg = await e.json?.() || {};
+        showToast(msg.detail || '合并失败', 'error');
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = prevHtml;
+        updateMergeBtn();
+    }
 }
 
 // 系统设置

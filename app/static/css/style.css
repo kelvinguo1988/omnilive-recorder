@@ -336,3 +336,12 @@ body {
     .sidebar { width: 60px; }
     .logo span, .nav-item span { display: none; }
 }
+
+/* 文件管理工具栏 */
+.file-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.file-toolbar .select { min-width: 120px; }
+#mergeBtn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* 复选框列 */
+.col-check { width: 40px; text-align: center; }
+.col-check input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; accent-color: var(--accent); }

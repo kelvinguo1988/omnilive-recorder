@@ -1,10 +1,17 @@
 """文件管理API"""
+import asyncio
 import os
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import BaseModel
 from app.services.file_manager import file_manager
 
 router = APIRouter(prefix="/api/files", tags=["files"])
+
+
+class MergeRequest(BaseModel):
+    file_paths: list[str]
+    output_format: str = "mp4"
 
 
 @router.get("")
@@ -70,3 +77,16 @@ async def delete_file(file_path: str):
     if not success:
         raise HTTPException(status_code=500, detail="删除失败")
     return {"message": "删除成功"}
+
+
+@router.post("/merge")
+async def merge_files(req: MergeRequest):
+    """合并多个碎片录制文件为一个 (concat demuxer, 流拷贝不重编码)"""
+    if not req.file_paths or len(req.file_paths) < 2:
+        raise HTTPException(status_code=400, detail="请至少选择 2 个文件")
+    result = await asyncio.to_thread(
+        file_manager.merge_recordings, req.file_paths, req.output_format
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "合并失败"))
+    return result

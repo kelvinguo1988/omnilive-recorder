@@ -1,7 +1,9 @@
 """文件管理服务"""
 import os
 import shutil
+import subprocess
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 from fastapi import HTTPException
@@ -155,6 +157,81 @@ class FileManager:
 
         result.sort(key=lambda x: x["total_size_mb"], reverse=True)
         return result
+
+
+    def merge_recordings(self, file_paths: list, output_format: str = "mp4") -> dict:
+        """合并多个录制文件为一个 (ffmpeg concat demuxer, 流拷贝不重编码)
+
+        用于把断流重连产生的多个碎片 .ts 拼成一个完整文件。
+        返回 {success, output_path, output_name, output_rel, file_size, file_size_mb, input_count}
+        """
+        if not file_paths or len(file_paths) < 2:
+            return {"success": False, "error": "至少需要 2 个文件才能合并"}
+
+        fmt = output_format if output_format in ("mp4", "ts", "mkv", "flv") else "mp4"
+
+        # 安全校验：所有文件必须位于输出目录内且真实存在
+        base_path = os.path.abspath(self.output_dir)
+        abs_paths = []
+        for rel in file_paths:
+            full = os.path.abspath(os.path.join(base_path, rel))
+            if not full.startswith(base_path):
+                return {"success": False, "error": f"非法路径: {rel}"}
+            if not os.path.exists(full):
+                return {"success": False, "error": f"文件不存在: {rel}"}
+            abs_paths.append(full)
+
+        merged_dir = os.path.join(base_path, "merged")
+        os.makedirs(merged_dir, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_name = f"merged_{ts}.{fmt}"
+        out_path = os.path.join(merged_dir, out_name)
+
+        # 写 ffmpeg concat 列表文件
+        list_path = os.path.join(merged_dir, f"_list_{ts}.txt")
+        with open(list_path, "w", encoding="utf-8") as f:
+            for p in abs_paths:
+                f.write(f"file '{p}'\n")
+
+        cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+               "-f", "concat", "-safe", "0", "-i", list_path]
+        if fmt == "mp4":
+            cmd += ["-c", "copy", "-movflags", "+faststart"]
+        else:
+            cmd += ["-c", "copy"]
+        cmd.append(out_path)
+
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+        except subprocess.TimeoutExpired:
+            self._safe_remove(list_path)
+            return {"success": False, "error": "合并超时 (超过 30 分钟)"}
+        except Exception as e:
+            self._safe_remove(list_path)
+            return {"success": False, "error": str(e)}
+
+        self._safe_remove(list_path)
+
+        if proc.returncode != 0:
+            return {"success": False, "error": (proc.stderr or "ffmpeg 执行失败")[-600:]}
+
+        size = os.path.getsize(out_path)
+        return {
+            "success": True,
+            "output_path": out_path,
+            "output_name": out_name,
+            "output_rel": os.path.relpath(out_path, base_path),
+            "file_size": size,
+            "file_size_mb": round(size / 1024 / 1024, 2),
+            "input_count": len(abs_paths),
+        }
+
+    @staticmethod
+    def _safe_remove(path: str):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
 
 file_manager = FileManager()
