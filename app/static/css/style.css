@@ -230,6 +230,27 @@ body {
 .form-group label { display: block; margin-bottom: 6px; font-size: 13px; font-weight: 500; color: var(--text-secondary); }
 .form-hint { margin-top: 4px; font-size: 12px; color: var(--text-tertiary); }
 
+/* 设置表单网格 */
+.settings-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0 20px; }
+.settings-grid .form-group { min-width: 0; }
+
+/* 勾选标签 */
+.checkbox-label {
+    display: flex !important;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    margin-bottom: 0 !important;
+    font-size: 13px !important;
+    font-weight: 500 !important;
+    color: var(--text-primary) !important;
+}
+.checkbox-label input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
+
+@media (max-width: 768px) {
+    .settings-grid { grid-template-columns: 1fr; }
+}
+
 /* 弹窗 */
 .modal-overlay {
     position: fixed;

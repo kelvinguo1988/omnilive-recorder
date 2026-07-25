@@ -2,16 +2,42 @@
 import psutil
 import platform
 import os
-from fastapi import APIRouter, Depends
+from typing import Optional
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models import Room, Recording, SystemLog
 from app.services.file_manager import file_manager
 from app.services.recorder import recorder
-from app.config import settings
+from app.config import settings, save_config
 
 router = APIRouter(prefix="/api/system", tags=["system"])
+
+
+class SettingsUpdate(BaseModel):
+    """系统设置更新请求（所有字段均可选，仅更新传入项）"""
+    record_format: Optional[str] = None
+    video_quality: Optional[str] = None
+    segment_time: Optional[int] = None
+    max_retries: Optional[int] = None
+    retry_delay: Optional[int] = None
+    monitor_interval: Optional[int] = None
+    check_timeout: Optional[int] = None
+    output_dir: Optional[str] = None
+    max_disk_usage: Optional[int] = None
+    enable_notification: Optional[bool] = None
+    webhook_url: Optional[str] = None
+    enable_proxy: Optional[bool] = None
+    proxy_addr: Optional[str] = None
+    douyin_cookie: Optional[str] = None
+
+
+_VALID_FORMATS = {"ts", "flv", "mp4"}
+_INT_FIELDS = ("segment_time", "monitor_interval", "check_timeout",
+               "max_retries", "retry_delay", "max_disk_usage")
+_PROXY_RELATED = ("proxy_addr", "enable_proxy", "douyin_cookie")
 
 
 @router.get("/info")
@@ -19,14 +45,14 @@ async def system_info(db: AsyncSession = Depends(get_db)):
     """获取系统信息"""
     # 房间统计
     room_count = await db.scalar(select(func.count(Room.id)))
-    live_count = await db.scalar(select(func.count(Room.id).where(Room.is_live == True)))
-    recording_count = await db.scalar(select(func.count(Room.id).where(Room.is_recording == True)))
-    enabled_count = await db.scalar(select(func.count(Room.id).where(Room.enabled == True)))
+    live_count = await db.scalar(select(func.count(Room.id)).where(Room.is_live == True))
+    recording_count = await db.scalar(select(func.count(Room.id)).where(Room.is_recording == True))
+    enabled_count = await db.scalar(select(func.count(Room.id)).where(Room.enabled == True))
 
     # 录制统计
     total_recordings = await db.scalar(select(func.count(Recording.id)))
     completed_recordings = await db.scalar(
-        select(func.count(Recording.id).where(Recording.status == "completed"))
+        select(func.count(Recording.id)).where(Recording.status == "completed")
     )
 
     # 磁盘使用
@@ -108,3 +134,77 @@ async def get_platforms():
         }
         for p in platforms
     ]
+
+
+@router.put("/settings")
+async def update_settings(data: SettingsUpdate):
+    """更新系统设置（运行时生效 + 持久化到配置文件）"""
+    updates = {
+        k: v for k, v in data.model_dump(exclude_unset=True).items()
+        if v is not None
+    }
+    if not updates:
+        raise HTTPException(status_code=400, detail="未提供任何要更新的设置项")
+
+    # 校验录制格式
+    if "record_format" in updates and updates["record_format"] not in _VALID_FORMATS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"无效的录制格式: {updates['record_format']}，可选值: ts/flv/mp4",
+        )
+
+    # 校验整数型字段
+    for field in _INT_FIELDS:
+        if field in updates:
+            try:
+                val = int(updates[field])
+            except (ValueError, TypeError):
+                raise HTTPException(status_code=400, detail=f"{field} 必须为整数")
+            if val <= 0:
+                raise HTTPException(status_code=400, detail=f"{field} 必须为正数")
+            updates[field] = val
+
+    # 应用：更新全局 settings 实例（后续录制/监控自动读取新值）
+    proxy_related_changed = False
+    for key, value in updates.items():
+        old = getattr(settings, key, None)
+        if old != value:
+            setattr(settings, key, value)
+            if key in _PROXY_RELATED:
+                proxy_related_changed = True
+
+    # 输出目录变化：确保目录存在
+    if "output_dir" in updates:
+        os.makedirs(settings.output_dir, exist_ok=True)
+
+    # 代理/cookie 变化：清空已缓存的平台适配器实例，下次检查时按新配置重建
+    if proxy_related_changed:
+        from app.services.monitor import monitor
+        monitor._platform_instances.clear()
+
+    # 持久化到配置文件，重启后依然生效
+    try:
+        save_config(settings)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"保存配置失败: {e}")
+
+    return {
+        "success": True,
+        "message": "设置已更新",
+        "settings": {
+            "record_format": settings.record_format,
+            "video_quality": settings.video_quality,
+            "segment_time": settings.segment_time,
+            "max_retries": settings.max_retries,
+            "retry_delay": settings.retry_delay,
+            "monitor_interval": settings.monitor_interval,
+            "check_timeout": settings.check_timeout,
+            "output_dir": settings.output_dir,
+            "max_disk_usage": settings.max_disk_usage,
+            "enable_notification": settings.enable_notification,
+            "webhook_url": settings.webhook_url,
+            "enable_proxy": settings.enable_proxy,
+            "proxy_addr": settings.proxy_addr,
+            "douyin_cookie": settings.douyin_cookie,
+        },
+    }

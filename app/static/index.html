@@ -240,17 +240,109 @@
         <div id="page-settings" class="page">
             <header class="page-header">
                 <h1>系统设置</h1>
+                <div>
+                    <button class="btn btn-secondary" onclick="resetSettingsForm()">重置</button>
+                    <button class="btn btn-primary" onclick="saveSettings(event)">保存设置</button>
+                </div>
             </header>
+
             <div class="card">
-                <div class="card-header"><h2>当前配置</h2></div>
-                <div class="card-body" id="settingsInfo">
-                    <div class="setting-row"><span>录制格式</span><span id="cfgFormat">-</span></div>
-                    <div class="setting-row"><span>监控间隔</span><span id="cfgInterval">-</span></div>
-                    <div class="setting-row"><span>分段时长</span><span id="cfgSegment">-</span></div>
-                    <div class="setting-row"><span>输出目录</span><span id="cfgOutput">-</span></div>
-                    <div class="setting-row"><span>支持平台</span><span id="cfgPlatforms">-</span></div>
+                <div class="card-header"><h2>录制与监控</h2></div>
+                <div class="card-body">
+                    <div class="settings-grid">
+                        <div class="form-group">
+                            <label>录制格式</label>
+                            <select id="set_record_format" class="select">
+                                <option value="ts">TS（推荐，分段友好）</option>
+                                <option value="flv">FLV</option>
+                                <option value="mp4">MP4</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>默认画质</label>
+                            <select id="set_video_quality" class="select">
+                                <option value="origin">原画</option>
+                                <option value="blue_ray">蓝光</option>
+                                <option value="ultra">超清</option>
+                                <option value="high">高清</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>分段时长（秒）</label>
+                            <input id="set_segment_time" class="input" type="number" min="1" />
+                            <div class="form-hint">单个文件录制时长上限，超时自动分段</div>
+                        </div>
+                        <div class="form-group">
+                            <label>监控间隔（秒）</label>
+                            <input id="set_monitor_interval" class="input" type="number" min="1" />
+                            <div class="form-hint">检查直播间开播状态的频率</div>
+                        </div>
+                        <div class="form-group">
+                            <label>检测超时（秒）</label>
+                            <input id="set_check_timeout" class="input" type="number" min="1" />
+                        </div>
+                        <div class="form-group">
+                            <label>最大重试次数</label>
+                            <input id="set_max_retries" class="input" type="number" min="0" />
+                        </div>
+                        <div class="form-group">
+                            <label>重试间隔（秒）</label>
+                            <input id="set_retry_delay" class="input" type="number" min="0" />
+                        </div>
+                        <div class="form-group">
+                            <label>磁盘用量上限（%）</label>
+                            <input id="set_max_disk_usage" class="input" type="number" min="1" max="100" />
+                        </div>
+                    </div>
                 </div>
             </div>
+
+            <div class="card" style="margin-top:16px">
+                <div class="card-header"><h2>存储</h2></div>
+                <div class="card-body">
+                    <div class="form-group">
+                        <label>录制输出目录</label>
+                        <input id="set_output_dir" class="input" type="text" />
+                        <div class="form-hint">修改后新录制将保存到新目录（已有文件不会移动）</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card" style="margin-top:16px">
+                <div class="card-header"><h2>通知 / 代理 / Cookie</h2></div>
+                <div class="card-body">
+                    <div class="settings-grid">
+                        <div class="form-group">
+                            <label class="checkbox-label">
+                                <input id="set_enable_notification" type="checkbox" /> 启用开播/结束通知
+                            </label>
+                        </div>
+                        <div class="form-group">
+                            <label>Webhook 地址</label>
+                            <input id="set_webhook_url" class="input" type="text" placeholder="https://..." />
+                        </div>
+                        <div class="form-group">
+                            <label class="checkbox-label">
+                                <input id="set_enable_proxy" type="checkbox" /> 启用代理访问直播间
+                            </label>
+                        </div>
+                        <div class="form-group">
+                            <label>代理地址</label>
+                            <input id="set_proxy_addr" class="input" type="text" placeholder="http://127.0.0.1:7890" />
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>抖音 Cookie（可选，部分直播间需要登录态）</label>
+                        <textarea id="set_douyin_cookie" class="input" rows="3" style="resize:vertical;font-family:monospace"></textarea>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card" style="margin-top:16px">
+                <div class="card-header"><h2>支持平台</h2></div>
+                <div class="card-body"><span id="cfgPlatforms">-</span></div>
+            </div>
+
             <div class="card" style="margin-top:16px">
                 <div class="card-header"><h2>系统日志</h2></div>
                 <div class="card-body">

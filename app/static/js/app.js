@@ -382,10 +382,21 @@ async function loadSettings() {
     try {
         const info = await API.get('/api/system/info');
         const s = info.settings || {};
-        document.getElementById('cfgFormat').textContent = s.record_format || '-';
-        document.getElementById('cfgInterval').textContent = (s.monitor_interval || '-') + ' 秒';
-        document.getElementById('cfgSegment').textContent = (s.segment_time || '-') + ' 秒';
-        document.getElementById('cfgOutput').textContent = s.output_dir || '-';
+
+        setField('set_record_format', s.record_format);
+        setField('set_video_quality', s.video_quality);
+        setField('set_segment_time', s.segment_time);
+        setField('set_monitor_interval', s.monitor_interval);
+        setField('set_check_timeout', s.check_timeout);
+        setField('set_max_retries', s.max_retries);
+        setField('set_retry_delay', s.retry_delay);
+        setField('set_max_disk_usage', s.max_disk_usage);
+        setField('set_output_dir', s.output_dir);
+        setField('set_webhook_url', s.webhook_url);
+        setField('set_proxy_addr', s.proxy_addr);
+        setField('set_douyin_cookie', s.douyin_cookie);
+        setCheck('set_enable_notification', s.enable_notification);
+        setCheck('set_enable_proxy', s.enable_proxy);
 
         const platforms = await API.get('/api/system/platforms');
         document.getElementById('cfgPlatforms').innerHTML = platforms.map(p =>
@@ -409,6 +420,69 @@ async function loadSettings() {
     } catch (e) {
         console.error('Load settings error:', e);
     }
+}
+
+// 表单辅助：根据 id 设置值/勾选状态
+function setField(id, value) {
+    const el = document.getElementById(id);
+    if (el) el.value = value ?? '';
+}
+function setCheck(id, checked) {
+    const el = document.getElementById(id);
+    if (el) el.checked = !!checked;
+}
+function getField(id) {
+    const el = document.getElementById(id);
+    return el ? el.value : '';
+}
+function getCheck(id) {
+    const el = document.getElementById(id);
+    return el ? el.checked : false;
+}
+
+// 保存设置
+async function saveSettings(e) {
+    const payload = {
+        record_format: getField('set_record_format'),
+        video_quality: getField('set_video_quality'),
+        segment_time: parseInt(getField('set_segment_time'), 10) || 0,
+        monitor_interval: parseInt(getField('set_monitor_interval'), 10) || 0,
+        check_timeout: parseInt(getField('set_check_timeout'), 10) || 0,
+        max_retries: parseInt(getField('set_max_retries'), 10) || 0,
+        retry_delay: parseInt(getField('set_retry_delay'), 10) || 0,
+        max_disk_usage: parseInt(getField('set_max_disk_usage'), 10) || 0,
+        output_dir: getField('set_output_dir'),
+        webhook_url: getField('set_webhook_url'),
+        proxy_addr: getField('set_proxy_addr'),
+        douyin_cookie: getField('set_douyin_cookie'),
+        enable_notification: getCheck('set_enable_notification'),
+        enable_proxy: getCheck('set_enable_proxy'),
+    };
+
+    const btn = e && e.target;
+    const oldLabel = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = '保存中...'; }
+
+    try {
+        const res = await API.put('/api/system/settings', payload);
+        if (res.success) {
+            showToast('设置已保存并生效', 'success');
+            await loadSettings();
+        } else {
+            showToast('保存失败: ' + (res.detail || '未知错误'), 'error');
+        }
+    } catch (e) {
+        const msg = (e && e.detail) || (e && e.message) || e;
+        showToast('保存失败: ' + msg, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = oldLabel; }
+    }
+}
+
+// 重置表单为当前已保存值
+function resetSettingsForm() {
+    loadSettings();
+    showToast('已重置为已保存的设置', 'info');
 }
 
 // 初始化

@@ -98,6 +98,8 @@ docker run -d \
 
 配置文件位于 `config/config.ini`，或通过环境变量（前缀 `LIVE_RECORDER_`）覆盖。
 
+> **Web 界面配置**：系统设置页现在支持可视化配置（录制格式、监控间隔、分段时长、输出目录、代理、抖音 Cookie、通知等）。保存后**立即生效**，并自动写回 `config.ini`，容器重启后依然保留。后端接口：`PUT /api/system/settings`。
+
 | 配置项 | 说明 | 默认值 |
 | --- | --- | --- |
 | `record_format` | 录制格式：`ts` / `flv` / `mp4` | `ts` |
