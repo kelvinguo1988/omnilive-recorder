@@ -31,6 +31,10 @@ class LiveMonitor:
             cookie = ""
             if platform_name == "douyin":
                 cookie = settings.douyin_cookie
+            elif platform_name == "bilibili":
+                cookie = settings.bilibili_cookie
+            elif platform_name == "kuaishou":
+                cookie = settings.kuaishou_cookie
             proxy = settings.proxy_addr if settings.enable_proxy else ""
 
             instance = PlatformFactory.get_platform(

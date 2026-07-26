@@ -429,6 +429,8 @@ async function loadSettings() {
         setField('set_webhook_url', s.webhook_url);
         setField('set_proxy_addr', s.proxy_addr);
         setField('set_douyin_cookie', s.douyin_cookie);
+        setField('set_bilibili_cookie', s.bilibili_cookie);
+        setField('set_kuaishou_cookie', s.kuaishou_cookie);
         setCheck('set_enable_notification', s.enable_notification);
         setCheck('set_enable_proxy', s.enable_proxy);
 
@@ -492,6 +494,8 @@ async function saveSettings(e) {
         webhook_url: getField('set_webhook_url'),
         proxy_addr: getField('set_proxy_addr'),
         douyin_cookie: getField('set_douyin_cookie'),
+        bilibili_cookie: getField('set_bilibili_cookie'),
+        kuaishou_cookie: getField('set_kuaishou_cookie'),
         enable_notification: getCheck('set_enable_notification'),
         enable_proxy: getCheck('set_enable_proxy'),
     };

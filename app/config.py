@@ -40,6 +40,10 @@ class AppConfig(BaseSettings):
 
     # 抖音Cookie
     douyin_cookie: str = ""
+    # B站Cookie（可选；不填则自动获取游客 buvid3。原画 qn=10000 需要带游客标识绕过风控）
+    bilibili_cookie: str = ""
+    # 快手Cookie（可选；公共直播间通常无需登录态，仅在个别受限网络手动填写）
+    kuaishou_cookie: str = ""
 
     # 数据库
     database_url: str = "sqlite+aiosqlite:////app/data/live_recorder.db"
@@ -84,6 +88,8 @@ def _get_mapping():
         "enable_proxy": lambda x: x.lower() == "true",
         "proxy_addr": str,
         "douyin_cookie": str,
+        "bilibili_cookie": str,
+        "kuaishou_cookie": str,
     }
 
 
@@ -171,6 +177,8 @@ def save_config(config: AppConfig = None) -> bool:
     section["enable_proxy"] = b(config.enable_proxy)
     section["proxy_addr"] = str(config.proxy_addr)
     section["douyin_cookie"] = str(config.douyin_cookie)
+    section["bilibili_cookie"] = str(config.bilibili_cookie)
+    section["kuaishou_cookie"] = str(config.kuaishou_cookie)
 
     parent = os.path.dirname(config_path)
     if parent:

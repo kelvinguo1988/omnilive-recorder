@@ -348,6 +348,16 @@
                         <textarea id="set_douyin_cookie" class="input" rows="3" style="resize:vertical;font-family:monospace" placeholder="例如: ttwid=xxxx; sid_tt=xxxx; sessionid=xxxx"></textarea>
                         <div class="form-hint">留空则不使用登录态。示例格式见上方灰色占位文本，可从浏览器开发者工具复制</div>
                     </div>
+                    <div class="form-group">
+                        <label>B站 Cookie（可选，默认自动获取游客标识）</label>
+                        <textarea id="set_bilibili_cookie" class="input" rows="3" style="resize:vertical;font-family:monospace" placeholder="例如: buvid3=xxxx; buvid4=xxxx; SESSDATA=xxxx"></textarea>
+                        <div class="form-hint">留空时自动访问 bilibili.com 获取游客 buvid3（绕过 -352 风控，原画可录）。如遇风控可手动粘贴浏览器 Cookie</div>
+                    </div>
+                    <div class="form-group">
+                        <label>快手 Cookie（可选，公共直播间通常无需）</label>
+                        <textarea id="set_kuaishou_cookie" class="input" rows="3" style="resize:vertical;font-family:monospace" placeholder="例如: did=xxxx; clientid=xxxx; kuaishou.server.web_st=xxxx"></textarea>
+                        <div class="form-hint">公共直播间一般无需登录态；仅在个别受限网络录制失败时可手动粘贴浏览器 Cookie</div>
+                    </div>
                 </div>
             </div>
 

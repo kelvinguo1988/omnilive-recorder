@@ -99,7 +99,7 @@ docker run -d \
 
 配置文件位于 `config/config.ini`，或通过环境变量（前缀 `LIVE_RECORDER_`）覆盖。
 
-> **Web 界面配置**：系统设置页现在支持可视化配置（录制格式、监控间隔、分段时长、输出目录、**输出文件名模板**、代理、抖音 Cookie、通知等）。保存后**立即生效**，并自动写回 `config.ini`，容器重启后依然保留。后端接口：`PUT /api/system/settings`。
+> **Web 界面配置**：系统设置页现在支持可视化配置（录制格式、监控间隔、分段时长、输出目录、**输出文件名模板**、代理、抖音 / B站 / 快手 Cookie、通知等）。保存后**立即生效**，并自动写回 `config.ini`，容器重启后依然保留。后端接口：`PUT /api/system/settings`。
 
 | 配置项 | 说明 | 默认值 |
 | --- | --- | --- |
@@ -110,7 +110,11 @@ docker run -d \
 | `max_retries` | 录制失败最大重试次数 | `3` |
 | `output_dir` | 录制输出根目录（实际文件位于 `{output_dir}/{平台}/{主播}/{日期}/` 下） | `/app/recordings` |
 | `douyin_cookie` | 抖音 Cookie（提高解析成功率，可选） | 空 |
+| `bilibili_cookie` | B站 Cookie（**可选**；留空则自动获取游客 buvid3 绕过风控。原画 `qn=10000` 需带游客标识才能拿到流地址） | 空 |
+| `kuaishou_cookie` | 快手 Cookie（可选；公共直播间通常无需登录态，仅个别受限网络手动填写） | 空 |
 | `enable_proxy` / `proxy_addr` | 代理开关与地址（海外/受限网络可用） | 关闭 |
+
+> **B站 Cookie 说明**：B站裸请求会被风控拦截（`code=-352`），必须带一个真实有效的 `buvid3` 游客标识。**默认（留空）会自动访问 `bilibili.com` 获取游客 `buvid3`**，无需登录即可录制原画；若自动获取仍被风控，可在「系统设置 → B站 Cookie」手动粘贴浏览器中的 `buvid3` / `SESSDATA` 等。快手公共直播间一般无需 Cookie，仅在受限网络失败时可手动填写。
 
 **输出文件名模板 `filename_template` 占位符**：
 
@@ -133,6 +137,9 @@ docker run -d \
 export LIVE_RECORDER_RECORD_FORMAT=mp4
 export LIVE_RECORDER_MONITOR_INTERVAL=60
 export LIVE_RECORDER_DOUYIN_COOKIE="your_cookie_here"
+# B站 Cookie 留空即自动获取游客 buvid3；受限网络可手动指定
+export LIVE_RECORDER_BILIBILI_COOKIE="buvid3=xxxx; SESSDATA=xxxx"
+export LIVE_RECORDER_KUAISHOU_COOKIE="did=xxxx; clientid=xxxx"
 ```
 
 ---

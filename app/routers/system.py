@@ -33,12 +33,14 @@ class SettingsUpdate(BaseModel):
     enable_proxy: Optional[bool] = None
     proxy_addr: Optional[str] = None
     douyin_cookie: Optional[str] = None
+    bilibili_cookie: Optional[str] = None
+    kuaishou_cookie: Optional[str] = None
 
 
 _VALID_FORMATS = {"ts", "flv", "mp4"}
 _INT_FIELDS = ("segment_time", "monitor_interval", "check_timeout",
                "max_retries", "retry_delay", "max_disk_usage")
-_PROXY_RELATED = ("proxy_addr", "enable_proxy", "douyin_cookie")
+_PROXY_RELATED = ("proxy_addr", "enable_proxy", "douyin_cookie", "bilibili_cookie", "kuaishou_cookie")
 
 
 @router.get("/info")
@@ -99,6 +101,8 @@ async def system_info(db: AsyncSession = Depends(get_db)):
             "enable_proxy": settings.enable_proxy,
             "proxy_addr": settings.proxy_addr,
             "douyin_cookie": settings.douyin_cookie,
+            "bilibili_cookie": settings.bilibili_cookie,
+            "kuaishou_cookie": settings.kuaishou_cookie,
         },
     }
 
@@ -237,5 +241,7 @@ async def update_settings(data: SettingsUpdate):
             "enable_proxy": settings.enable_proxy,
             "proxy_addr": settings.proxy_addr,
             "douyin_cookie": settings.douyin_cookie,
+            "bilibili_cookie": settings.bilibili_cookie,
+            "kuaishou_cookie": settings.kuaishou_cookie,
         },
     }

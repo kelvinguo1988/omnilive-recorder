@@ -59,8 +59,9 @@ class BilibiliPlatform(BasePlatform):
                 "Referer": f"https://live.bilibili.com/{room_id}",
                 "Accept": "application/json, text/plain, */*",
             }
-            if self.cookie:
-                headers["Cookie"] = self.cookie
+            guest_cookie = await self._ensure_guest_cookie()
+            if guest_cookie:
+                headers["Cookie"] = guest_cookie
 
             response = await self.client.get(room_info_url, headers=headers)
             data = response.json()
@@ -81,6 +82,35 @@ class BilibiliPlatform(BasePlatform):
             logger.error(f"获取B站房间信息失败 {url}: {e}")
 
         return info
+
+    async def _ensure_guest_cookie(self) -> str:
+        """游客 Cookie：优先使用系统配置的 bilibili_cookie（方案B），否则自动获取真实 buvid3（方案A，默认）。
+
+        B站裸请求会被风控拦截（code=-352），必须带一个真实有效的 buvid3 游客标识才能拿到流地址。
+        buvid3 来自访问 bilibili.com 首页时服务端下发的 Set-Cookie，无需登录。
+        结果缓存在 self._buvid3，避免每次请求都重新获取。
+        """
+        if self.cookie:
+            return self.cookie
+        cached = getattr(self, "_buvid3", "")
+        if cached:
+            return f"buvid3={cached}"
+        try:
+            resp = await self.client.get(
+                "https://www.bilibili.com/",
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                },
+            )
+            buvid3 = resp.cookies.get("buvid3", "")
+            if buvid3:
+                self._buvid3 = buvid3
+                logger.info("B站自动获取游客 buvid3 成功（绕过风控）")
+                return f"buvid3={self._buvid3}"
+        except Exception as e:
+            logger.warning(f"B站自动获取 buvid3 失败: {e}")
+        return ""
 
     async def _get_stream_url(self, room_id: str) -> str:
         """获取B站直播流地址"""
@@ -105,8 +135,9 @@ class BilibiliPlatform(BasePlatform):
                 "Referer": f"https://live.bilibili.com/{room_id}",
                 "Accept": "application/json, text/plain, */*",
             }
-            if self.cookie:
-                headers["Cookie"] = self.cookie
+            guest_cookie = await self._ensure_guest_cookie()
+            if guest_cookie:
+                headers["Cookie"] = guest_cookie
 
             response = await self.client.get(stream_url, params=params, headers=headers)
             data = response.json()
