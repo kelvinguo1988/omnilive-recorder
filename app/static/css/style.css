@@ -225,6 +225,7 @@ body {
     outline: none;
 }
 .input:focus, .select:focus { border-color: var(--accent); }
+.input::placeholder, .select::placeholder, textarea::placeholder { color: var(--text-tertiary); opacity: 1; }
 
 .form-group { margin-bottom: 16px; }
 .form-group label { display: block; margin-bottom: 6px; font-size: 13px; font-weight: 500; color: var(--text-secondary); }
