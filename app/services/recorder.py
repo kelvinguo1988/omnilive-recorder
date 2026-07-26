@@ -51,6 +51,41 @@ class FFmpegRecorder:
 
         return dir_path, file_path
 
+    def build_session_target(self, platform: str, streamer_name: str, room_id: str,
+                             part_index: int = 1, record_format: str = None,
+                             segment_time: int = None) -> tuple[str, str]:
+        """为一场所录制的某个 part 计算输出路径。
+
+        返回 (final_path, part_target)：
+        - final_path: 整场录制的最终文件（{base}.{fmt}），断流重连后由所有 part 合并得到。
+        - part_target: 本次 ffmpeg 写入目标；segment 模式下包含 %04d 模板。
+        """
+        fmt = record_format or settings.record_format
+        seg = segment_time if segment_time is not None else settings.segment_time
+
+        now = datetime.now()
+        date_str = now.strftime("%Y-%m-%d")
+        time_str = now.strftime("%H%M%S")
+
+        streamer = self._sanitize_filename(streamer_name) or room_id
+        platform_cn = {
+            "douyin": "抖音",
+            "bilibili": "B站",
+            "kuaishou": "快手",
+        }.get(platform, platform)
+
+        dir_path = os.path.join(settings.output_dir, platform_cn, streamer, date_str)
+        os.makedirs(dir_path, exist_ok=True)
+
+        base = f"{streamer}_{time_str}"
+        final_path = os.path.join(dir_path, f"{base}.{fmt}")
+        if seg and seg > 0 and fmt == "ts":
+            part_target = os.path.join(dir_path, f"{base}_part{part_index:03d}_%04d.{fmt}")
+        else:
+            part_target = os.path.join(dir_path, f"{base}_part{part_index:03d}.{fmt}")
+
+        return final_path, part_target
+
     def _build_ffmpeg_command(self, stream_url: str, output_path: str,
                               segment_time: int = None, record_format: str = None) -> list:
         """构建FFmpeg命令"""
@@ -84,11 +119,16 @@ class FFmpegRecorder:
         if fmt == "ts":
             cmd.extend(["-f", "mpegts"])
             if seg_time > 0:
+                # 若调用方已提供分段模板（含 %04d，如断流重连的 part），直接使用；
+                # 否则基于输出路径自动追加 _%04d 分段后缀
+                seg_target = output_path
+                if "%04d" not in output_path:
+                    seg_target = output_path.replace(f".{fmt}", "_%04d.ts")
                 cmd.extend(["-segment_time", str(seg_time),
                             "-segment_format", "mpegts",
                             "-reset_timestamps", "1",
                             "-f", "segment",
-                            output_path.replace(f".{fmt}", "_%04d.ts")])
+                            seg_target])
             else:
                 cmd.append(output_path)
         elif fmt == "flv":
@@ -105,18 +145,30 @@ class FFmpegRecorder:
 
     async def start_recording(self, room_db_id: int, stream_url: str,
                               platform: str, streamer_name: str,
-                              room_id: str, record_format: str = None) -> dict:
-        """开始录制"""
+                              room_id: str, record_format: str = None,
+                              output_path: str = None,
+                              segment_time: int = None) -> dict:
+        """开始录制。
+
+        output_path 指定时写入该路径（用于断流重连续写同一场的某个 part），
+        否则按默认命名自动生成（开播 / 手动开始时用于首个 part）。
+        """
         async with self._lock:
             if room_db_id in self.active_processes:
                 logger.warning(f"房间 {room_db_id} 已在录制中")
                 return {"success": False, "error": "已在录制中"}
 
-        dir_path, file_path = self._get_output_path(
-            platform, streamer_name, room_id, record_format
-        )
+        if output_path is None:
+            dir_path, file_path = self._get_output_path(
+                platform, streamer_name, room_id, record_format
+            )
+            seg_time = segment_time if segment_time is not None else settings.segment_time
+        else:
+            file_path = output_path
+            dir_path = os.path.dirname(output_path)
+            seg_time = segment_time if segment_time is not None else settings.segment_time
 
-        cmd = self._build_ffmpeg_command(stream_url, file_path, record_format=record_format)
+        cmd = self._build_ffmpeg_command(stream_url, file_path, segment_time=seg_time, record_format=record_format)
         logger.info(f"开始录制 房间{room_db_id}: {' '.join(cmd[:6])}... 输出: {file_path}")
 
         try:

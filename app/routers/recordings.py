@@ -1,4 +1,5 @@
 """录制记录API"""
+import json
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -6,6 +7,15 @@ from app.database import get_db
 from app.models import Recording, Room
 
 router = APIRouter(prefix="/api/recordings", tags=["recordings"])
+
+
+def _part_count(rec: Recording) -> int:
+    if rec.part_paths:
+        try:
+            return len(json.loads(rec.part_paths))
+        except (ValueError, TypeError):
+            return 1
+    return 1
 
 
 @router.get("")
@@ -37,6 +47,7 @@ async def list_recordings(skip: int = 0, limit: int = 50, db: AsyncSession = Dep
             "started_at": r.started_at.isoformat() if r.started_at else None,
             "ended_at": r.ended_at.isoformat() if r.ended_at else None,
             "error_message": r.error_message,
+            "part_count": _part_count(r),
         }
         for r, room in rows
     ]

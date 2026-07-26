@@ -1,4 +1,5 @@
 """房间管理API"""
+import json
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy import select, update, delete
@@ -192,6 +193,14 @@ async def get_room_recordings(room_id: int, db: AsyncSession = Depends(get_db)):
     )
     recordings = result.scalars().all()
 
+    def _part_count(rec):
+        if rec.part_paths:
+            try:
+                return len(json.loads(rec.part_paths))
+            except (ValueError, TypeError):
+                return 1
+        return 1
+
     return [
         {
             "id": r.id,
@@ -205,6 +214,7 @@ async def get_room_recordings(room_id: int, db: AsyncSession = Depends(get_db)):
             "started_at": r.started_at.isoformat() if r.started_at else None,
             "ended_at": r.ended_at.isoformat() if r.ended_at else None,
             "error_message": r.error_message,
+            "part_count": _part_count(r),
         }
         for r in recordings
     ]

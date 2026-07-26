@@ -46,6 +46,7 @@ class Recording(Base):
     started_at = Column(DateTime, default=datetime.utcnow, comment="开始时间")
     ended_at = Column(DateTime, nullable=True, comment="结束时间")
     error_message = Column(Text, nullable=True, comment="错误信息")
+    part_paths = Column(Text, nullable=True, comment="多段录制part路径列表(JSON)，断流重连时追加")
 
     room = relationship("Room", back_populates="recordings")
 
