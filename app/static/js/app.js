@@ -280,7 +280,7 @@ async function loadFiles() {
         const tbody = document.getElementById('filesTableBody');
 
         if (files.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="6" class="empty-state">暂无录制文件</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="7" class="empty-state">暂无录制文件</td></tr>';
             return;
         }
 
@@ -341,6 +341,39 @@ function updateMergeBtn() {
     if (countEl) countEl.textContent = checked.length;
     const btn = document.getElementById('mergeBtn');
     if (btn) btn.disabled = checked.length < 2;
+
+    // 批量删除按钮：选中任意数量即启用
+    const delCountEl = document.getElementById('delCount');
+    if (delCountEl) delCountEl.textContent = checked.length;
+    const delBtn = document.getElementById('delBtn');
+    if (delBtn) delBtn.disabled = checked.length < 1;
+}
+
+// 批量删除选中文件
+async function deleteSelected() {
+    const checked = [...document.querySelectorAll('.file-check:checked')];
+    if (checked.length === 0) {
+        showToast('请先勾选要删除的文件', 'error');
+        return;
+    }
+    if (!confirm(`确认删除选中的 ${checked.length} 个文件？此操作不可恢复。`)) return;
+
+    const file_paths = checked.map(c => c.dataset.path);
+    const btn = document.getElementById('delBtn');
+    if (btn) { btn.disabled = true; btn.textContent = '删除中...'; }
+
+    try {
+        const res = await API.post('/api/files/batch-delete', { file_paths });
+        if (res.failed_count > 0) {
+            showToast(`已删除 ${res.deleted_count} 个，失败 ${res.failed_count} 个`, 'error');
+        } else {
+            showToast(`已批量删除 ${res.deleted_count} 个文件`, 'success');
+        }
+        loadFiles();
+    } catch (e) {
+        showToast('批量删除失败', 'error');
+        if (btn) btn.disabled = false;
+    }
 }
 
 function toggleSelectAll(el) {

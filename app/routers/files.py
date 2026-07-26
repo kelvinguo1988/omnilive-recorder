@@ -14,6 +14,10 @@ class MergeRequest(BaseModel):
     output_format: str = "mp4"
 
 
+class BatchDeleteRequest(BaseModel):
+    file_paths: list[str]
+
+
 @router.get("")
 async def list_files(platform: str = None, streamer: str = None):
     """获取文件列表"""
@@ -90,3 +94,31 @@ async def merge_files(req: MergeRequest):
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error", "合并失败"))
     return result
+
+
+@router.post("/batch-delete")
+async def batch_delete_files(req: BatchDeleteRequest):
+    """批量删除文件（逐条复用 delete_file，含路径安全校验）"""
+    if not req.file_paths:
+        raise HTTPException(status_code=400, detail="未提供要删除的文件")
+
+    deleted, failed = [], []
+    for rel in req.file_paths:
+        try:
+            ok = file_manager.delete_file(rel)
+            if ok:
+                deleted.append(rel)
+            else:
+                failed.append({"path": rel, "error": "删除失败"})
+        except HTTPException as he:
+            failed.append({"path": rel, "error": he.detail})
+        except Exception as e:  # noqa: BLE001
+            failed.append({"path": rel, "error": str(e)})
+
+    return {
+        "success": len(failed) == 0,
+        "deleted": deleted,
+        "failed": failed,
+        "deleted_count": len(deleted),
+        "failed_count": len(failed),
+    }
