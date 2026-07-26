@@ -175,6 +175,8 @@ class LiveMonitor:
             part_index=1,
             record_format=fmt,
             segment_time=settings.segment_time,
+            template=settings.filename_template,
+            title=info.title,
         )
 
         result = await recorder.start_recording(
@@ -236,7 +238,7 @@ class LiveMonitor:
             if "." in base:
                 base = base[: base.rfind(".")]
             seg = settings.segment_time
-            if seg and seg > 0 and fmt == "ts":
+            if seg and seg > 0 and fmt in ("ts", "mp4"):
                 part_target = os.path.join(dir_path, f"{base}_part{next_index:03d}_%04d.{fmt}")
             else:
                 part_target = os.path.join(dir_path, f"{base}_part{next_index:03d}.{fmt}")

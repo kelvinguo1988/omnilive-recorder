@@ -28,13 +28,53 @@ class FFmpegRecorder:
         name = name.strip().strip(".")
         return name[:100] if name else "untitled"
 
+    def _build_base_name(self, platform: str, streamer_name: str, room_id: str,
+                         template: str = None, title: str = None) -> str:
+        """根据文件名模板生成基础文件名（不含扩展名）。
+
+        支持的占位符：
+          {streamer}  主播名（清洗后，无则回退 room_id）
+          {room_id}   房间 ID
+          {platform}  平台中文名（抖音/B站/快手）
+          {title}     直播标题（清洗后）
+          {date}      日期 YYYY-MM-DD
+          {time}      时间 HHMMSS
+          {datetime}  日期时间 YYYYMMDD_HHMMSS
+        """
+        now = datetime.now()
+        streamer = self._sanitize_filename(streamer_name) or (self._sanitize_filename(room_id) or "untitled")
+        platform_cn = {
+            "douyin": "抖音",
+            "bilibili": "B站",
+            "kuaishou": "快手",
+        }.get(platform, platform)
+
+        mapping = {
+            "streamer": streamer,
+            "room_id": self._sanitize_filename(room_id) if room_id else "",
+            "platform": platform_cn,
+            "title": self._sanitize_filename(title) if title else "",
+            "date": now.strftime("%Y-%m-%d"),
+            "time": now.strftime("%H%M%S"),
+            "datetime": now.strftime("%Y%m%d_%H%M%S"),
+        }
+
+        tmpl = template or settings.filename_template or "{streamer}_{time}"
+        base = tmpl
+        for k, v in mapping.items():
+            base = base.replace("{" + k + "}", v)
+
+        # 整体再清洗一次（去掉模板可能引入的非法字符，并限长）
+        base = self._sanitize_filename(base)
+        return base or "untitled"
+
     def _get_output_path(self, platform: str, streamer_name: str, room_id: str,
-                         record_format: str = None) -> tuple[str, str]:
-        """获取输出文件路径"""
+                         record_format: str = None, template: str = None,
+                         title: str = None) -> tuple[str, str]:
+        """获取输出文件路径（自动命名，用于未显式指定 output_path 时的兜底）"""
         fmt = record_format or settings.record_format
         now = datetime.now()
         date_str = now.strftime("%Y-%m-%d")
-        time_str = now.strftime("%H%M%S")
 
         streamer = self._sanitize_filename(streamer_name) or room_id
         platform_cn = {
@@ -46,26 +86,30 @@ class FFmpegRecorder:
         dir_path = os.path.join(settings.output_dir, platform_cn, streamer, date_str)
         os.makedirs(dir_path, exist_ok=True)
 
-        filename = f"{streamer}_{time_str}.{fmt}"
+        base = self._build_base_name(platform, streamer_name, room_id, template=template, title=title)
+        filename = f"{base}.{fmt}"
         file_path = os.path.join(dir_path, filename)
 
         return dir_path, file_path
 
     def build_session_target(self, platform: str, streamer_name: str, room_id: str,
                              part_index: int = 1, record_format: str = None,
-                             segment_time: int = None) -> tuple[str, str]:
+                             segment_time: int = None, template: str = None,
+                             title: str = None) -> tuple[str, str]:
         """为一场所录制的某个 part 计算输出路径。
 
         返回 (final_path, part_target)：
         - final_path: 整场录制的最终文件（{base}.{fmt}），断流重连后由所有 part 合并得到。
         - part_target: 本次 ffmpeg 写入目标；segment 模式下包含 %04d 模板。
+
+        文件名 base 由 filename_template 决定；分段仅在 ts/mp4 且 segment_time>0 时生效
+        （flv 不支持可靠的流式分段，始终为单文件）。
         """
         fmt = record_format or settings.record_format
         seg = segment_time if segment_time is not None else settings.segment_time
 
         now = datetime.now()
         date_str = now.strftime("%Y-%m-%d")
-        time_str = now.strftime("%H%M%S")
 
         streamer = self._sanitize_filename(streamer_name) or room_id
         platform_cn = {
@@ -77,9 +121,9 @@ class FFmpegRecorder:
         dir_path = os.path.join(settings.output_dir, platform_cn, streamer, date_str)
         os.makedirs(dir_path, exist_ok=True)
 
-        base = f"{streamer}_{time_str}"
+        base = self._build_base_name(platform, streamer_name, room_id, template=template, title=title)
         final_path = os.path.join(dir_path, f"{base}.{fmt}")
-        if seg and seg > 0 and fmt == "ts":
+        if seg and seg > 0 and fmt in ("ts", "mp4"):
             part_target = os.path.join(dir_path, f"{base}_part{part_index:03d}_%04d.{fmt}")
         else:
             part_target = os.path.join(dir_path, f"{base}_part{part_index:03d}.{fmt}")
@@ -117,27 +161,34 @@ class FFmpegRecorder:
 
         # 输出格式
         if fmt == "ts":
-            cmd.extend(["-f", "mpegts"])
-            if seg_time > 0:
+            if seg_time and seg_time > 0:
                 # 若调用方已提供分段模板（含 %04d，如断流重连的 part），直接使用；
                 # 否则基于输出路径自动追加 _%04d 分段后缀
                 seg_target = output_path
                 if "%04d" not in output_path:
-                    seg_target = output_path.replace(f".{fmt}", "_%04d.ts")
-                cmd.extend(["-segment_time", str(seg_time),
+                    seg_target = output_path.replace(f".{fmt}", f"_%04d.{fmt}")
+                cmd.extend(["-f", "segment",
                             "-segment_format", "mpegts",
                             "-reset_timestamps", "1",
-                            "-f", "segment",
+                            "-segment_time", str(seg_time),
                             seg_target])
             else:
-                cmd.append(output_path)
+                cmd.extend(["-f", "mpegts", output_path])
         elif fmt == "flv":
-            cmd.extend(["-f", "flv"])
-            cmd.append(output_path)
+            # flv 不支持可靠的流式分段，始终单文件
+            cmd.extend(["-f", "flv", output_path])
         elif fmt == "mp4":
-            cmd.extend(["-f", "mp4",
-                        "-movflags", "+faststart"])
-            cmd.append(output_path)
+            if seg_time and seg_time > 0 and "%04d" in output_path:
+                # mp4 分段：每个分片为独立可播放的 mp4，断流重连时由 merge 合并
+                cmd.extend(["-f", "segment",
+                            "-segment_format", "mp4",
+                            "-reset_timestamps", "1",
+                            "-segment_time", str(seg_time),
+                            output_path])
+            else:
+                cmd.extend(["-f", "mp4",
+                            "-movflags", "+faststart",
+                            output_path])
         else:
             cmd.append(output_path)
 

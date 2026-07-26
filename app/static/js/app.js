@@ -392,6 +392,7 @@ async function loadSettings() {
         setField('set_retry_delay', s.retry_delay);
         setField('set_max_disk_usage', s.max_disk_usage);
         setField('set_output_dir', s.output_dir);
+        setField('set_filename_template', s.filename_template);
         setField('set_webhook_url', s.webhook_url);
         setField('set_proxy_addr', s.proxy_addr);
         setField('set_douyin_cookie', s.douyin_cookie);
@@ -402,6 +403,8 @@ async function loadSettings() {
         document.getElementById('cfgPlatforms').innerHTML = platforms.map(p =>
             `<span class="platform-tag" style="background:${p.color}22;color:${p.color}">${p.name}</span>`
         ).join(' ');
+
+        updateFilenamePreview();
 
         // 加载日志
         const logs = await API.get('/api/system/logs?limit=50');
@@ -452,6 +455,7 @@ async function saveSettings(e) {
         retry_delay: parseInt(getField('set_retry_delay'), 10) || 0,
         max_disk_usage: parseInt(getField('set_max_disk_usage'), 10) || 0,
         output_dir: getField('set_output_dir'),
+        filename_template: getField('set_filename_template'),
         webhook_url: getField('set_webhook_url'),
         proxy_addr: getField('set_proxy_addr'),
         douyin_cookie: getField('set_douyin_cookie'),
@@ -483,6 +487,35 @@ async function saveSettings(e) {
 function resetSettingsForm() {
     loadSettings();
     showToast('已重置为已保存的设置', 'info');
+}
+
+// 实时预览最终输出路径（基于模板 + 当前格式 + 示例值）
+function updateFilenamePreview() {
+    const tmpl = (document.getElementById('set_filename_template')?.value || '{streamer}_{time}').trim();
+    const fmt = document.getElementById('set_record_format')?.value || 'ts';
+    const outputDir = document.getElementById('set_output_dir')?.value || '/app/recordings';
+
+    const sample = {
+        streamer: '主播名',
+        room_id: '123456',
+        platform: '抖音',
+        title: '测试标题',
+        date: '2026-07-26',
+        time: '193000',
+        datetime: '20260726_193000',
+    };
+
+    let base = tmpl;
+    for (const [k, v] of Object.entries(sample)) {
+        base = base.split('{' + k + '}').join(v);
+    }
+    // 粗略清洗，与后端 _sanitize_filename 对齐
+    base = base.replace(/[\\/:*?"<>|\n\r\t]/g, '_').trim().replace(/^[._]+|[._]+$/g, '').slice(0, 100) || 'untitled';
+
+    const el = document.getElementById('filenamePreview');
+    if (el) {
+        el.innerHTML = `输出示例：<code>${outputDir}/抖音/主播名/2026-07-26/${base}.${fmt}</code>`;
+    }
 }
 
 // 初始化

@@ -27,6 +27,7 @@ class SettingsUpdate(BaseModel):
     check_timeout: Optional[int] = None
     output_dir: Optional[str] = None
     max_disk_usage: Optional[int] = None
+    filename_template: Optional[str] = None
     enable_notification: Optional[bool] = None
     webhook_url: Optional[str] = None
     enable_proxy: Optional[bool] = None
@@ -92,6 +93,7 @@ async def system_info(db: AsyncSession = Depends(get_db)):
             "check_timeout": settings.check_timeout,
             "output_dir": settings.output_dir,
             "max_disk_usage": settings.max_disk_usage,
+            "filename_template": settings.filename_template,
             "enable_notification": settings.enable_notification,
             "webhook_url": settings.webhook_url,
             "enable_proxy": settings.enable_proxy,
@@ -163,6 +165,24 @@ async def update_settings(data: SettingsUpdate):
             detail=f"无效的录制格式: {updates['record_format']}，可选值: ts/flv/mp4",
         )
 
+    # 校验文件名模板
+    if "filename_template" in updates:
+        tmpl = updates["filename_template"] or ""
+        if not tmpl or "/" in tmpl or "\\" in tmpl:
+            raise HTTPException(
+                status_code=400,
+                detail="文件名模板不能为空且不能包含路径分隔符（/ 或 \\）",
+            )
+        # 占位符替换后必须非空、且不能只剩点号，避免生成空文件名
+        _test = tmpl
+        for _k in ("streamer", "room_id", "platform", "title", "date", "time", "datetime"):
+            _test = _test.replace("{" + _k + "}", "x")
+        if not _test.strip().strip("."):
+            raise HTTPException(
+                status_code=400,
+                detail="文件名模板替换后为空，请至少包含 {streamer}/{room_id}/{time} 等占位符之一",
+            )
+
     # 校验整数型字段
     for field in _INT_FIELDS:
         if field in updates:
@@ -211,6 +231,7 @@ async def update_settings(data: SettingsUpdate):
             "check_timeout": settings.check_timeout,
             "output_dir": settings.output_dir,
             "max_disk_usage": settings.max_disk_usage,
+            "filename_template": settings.filename_template,
             "enable_notification": settings.enable_notification,
             "webhook_url": settings.webhook_url,
             "enable_proxy": settings.enable_proxy,

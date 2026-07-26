@@ -229,6 +229,10 @@ body {
 .form-group { margin-bottom: 16px; }
 .form-group label { display: block; margin-bottom: 6px; font-size: 13px; font-weight: 500; color: var(--text-secondary); }
 .form-hint { margin-top: 4px; font-size: 12px; color: var(--text-tertiary); }
+.form-hint code { background: var(--bg-tertiary); padding: 1px 5px; border-radius: 4px; font-size: 11px; color: var(--accent); }
+.filename-preview { margin-top: 8px; font-size: 12px; color: var(--text-secondary); word-break: break-all; }
+.filename-preview code { background: var(--bg-tertiary); padding: 3px 8px; border-radius: 6px; font-size: 12px; color: var(--success); }
+
 
 /* 设置表单网格 */
 .settings-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0 20px; }

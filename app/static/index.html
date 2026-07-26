@@ -252,7 +252,7 @@
                     <div class="settings-grid">
                         <div class="form-group">
                             <label>录制格式</label>
-                            <select id="set_record_format" class="select">
+                            <select id="set_record_format" class="select" onchange="updateFilenamePreview()">
                                 <option value="ts">TS（推荐，分段友好）</option>
                                 <option value="flv">FLV</option>
                                 <option value="mp4">MP4</option>
@@ -269,8 +269,8 @@
                         </div>
                         <div class="form-group">
                             <label>分段时长（秒）</label>
-                            <input id="set_segment_time" class="input" type="number" min="1" />
-                            <div class="form-hint">单个文件录制时长上限，超时自动分段</div>
+                            <input id="set_segment_time" class="input" type="number" min="1" oninput="updateFilenamePreview()" />
+                            <div class="form-hint">单文件录制时长上限，超时自动分段。TS / MP4 支持分段；FLV 始终为单文件</div>
                         </div>
                         <div class="form-group">
                             <label>监控间隔（秒）</label>
@@ -302,8 +302,19 @@
                 <div class="card-body">
                     <div class="form-group">
                         <label>录制输出目录</label>
-                        <input id="set_output_dir" class="input" type="text" />
+                        <input id="set_output_dir" class="input" type="text" oninput="updateFilenamePreview()" />
                         <div class="form-hint">修改后新录制将保存到新目录（已有文件不会移动）</div>
+                    </div>
+                    <div class="form-group">
+                        <label>输出文件名模板</label>
+                        <input id="set_filename_template" class="input" type="text" oninput="updateFilenamePreview()" placeholder="{streamer}_{time}" />
+                        <div class="form-hint">
+                            占位符：<code>{streamer}</code> 主播名 · <code>{room_id}</code> 房间ID ·
+                            <code>{platform}</code> 平台 · <code>{title}</code> 标题 ·
+                            <code>{date}</code> 日期 · <code>{time}</code> 时间 · <code>{datetime}</code> 日期时间。<br>
+                            建议至少包含 <code>{streamer}</code> 或 <code>{room_id}</code>，避免不同直播文件名冲突。
+                        </div>
+                        <div class="filename-preview" id="filenamePreview"></div>
                     </div>
                 </div>
             </div>

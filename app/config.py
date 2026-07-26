@@ -15,6 +15,9 @@ class AppConfig(BaseSettings):
     max_retries: int = 3
     retry_delay: int = 10
 
+    # 输出文件名模板（占位符见 recorder._build_base_name）
+    filename_template: str = "{streamer}_{time}"
+
     # 监控设置
     monitor_interval: int = 120
     check_timeout: int = 15
@@ -69,6 +72,7 @@ def _get_mapping():
         "segment_time": int,
         "max_retries": int,
         "retry_delay": int,
+        "filename_template": str,
         "monitor_interval": int,
         "check_timeout": int,
         "output_dir": str,
@@ -155,6 +159,7 @@ def save_config(config: AppConfig = None) -> bool:
     section["segment_time"] = str(config.segment_time)
     section["max_retries"] = str(config.max_retries)
     section["retry_delay"] = str(config.retry_delay)
+    section["filename_template"] = str(config.filename_template)
     section["monitor_interval"] = str(config.monitor_interval)
     section["check_timeout"] = str(config.check_timeout)
     section["output_dir"] = str(config.output_dir)
