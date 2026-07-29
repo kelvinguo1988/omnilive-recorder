@@ -11,13 +11,10 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      # 录制文件持久化。
-      # 默认: 本地 ./recordings 卷。
-      # NAS / 小容器磁盘: 设置 RECORDINGS_HOST_PATH 指向 NAS 真实目录后启动,
-      #   例如 RECORDINGS_HOST_PATH=/Container/.../volumes/.../_data docker compose up -d
-      #   或把变量写进同目录 .env 后 docker compose up -d
-      # 系统设置里 output_dir 填 /app/recordings 即可直接写入 NAS, 不占容器磁盘。
-      - ${RECORDINGS_HOST_PATH:-./recordings}:/app/recordings
+      # 录制文件持久化: 使用 named volume, docker compose up 时由 Docker 自动在
+      # NAS 盘的 Docker 卷目录创建 (数据根目录位于 CACHEDEV1_DATA 存储池),
+      # 文件直接落 NAS, 不占容器磁盘 (与 bililiverecorder 行为一致)。
+      - omni-recordings:/app/recordings
       # 数据库持久化
       - ./data:/app/data
       # 配置文件
@@ -42,3 +39,11 @@ services:
       timeout: 10s
       start_period: 15s
       retries: 3
+
+volumes:
+  # 录制文件卷: 不指定 external, docker compose up 时自动创建。
+  # Docker 数据根目录位于 NAS 存储池 (CACHEDEV1_DATA), 故该卷物理上位于
+  # /share/CACHEDEV1_DATA/Container/.../volumes/omni-recordings/_data,
+  # 即自动使用 NAS 大容量盘, 与 bililiverecorder 行为一致。
+  omni-recordings:
+    driver: local

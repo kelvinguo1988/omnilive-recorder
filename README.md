@@ -95,21 +95,26 @@ docker run -d \
 
 ### NAS / 小容器磁盘部署（推荐）
 
-容器自身分配磁盘通常较小，长时间录制建议把文件直接落到 NAS 大容量卷：
+容器自身分配磁盘较小，而 Docker 数据根目录就在 NAS 存储池（`CACHEDEV1_DATA`），因此**使用 named volume 即可让录制文件自动落 NAS，且部署零额外配置**：
 
-- **方式一（命令行 compose）**：把录制卷改为绑定宿主机 NAS 目录：
+- **方式一 · named volume（推荐，已默认启用）**：`docker-compose.yml` 中把录制卷声明为 named volume：
+  ```yaml
+  services:
+    live-recorder:
+      volumes:
+        - omni-recordings:/app/recordings
+  volumes:
+    omni-recordings:
+      driver: local
+  ```
+  `docker compose up` 时 Docker 自动在 NAS 盘的 Docker 卷目录（`/share/CACHEDEV1_DATA/Container/.../volumes/omni-recordings/_data`）创建该卷，文件直接写 NAS、不占容器磁盘——与 bililiverecorder 行为完全一致。系统设置里 `output_dir` 填 `/app/recordings` 即可，无需填任何 NAS 物理路径。
+- **方式二 · 精确指定到已有目录 / 复用其它卷**：把录制卷改为 bind mount 宿主机路径，例如复用你已有的 `744c...` 卷物理目录：
   ```yaml
   volumes:
-    - /Container/container-station-data/lib/docker/volumes/744c.../_data:/app/recordings
+    - /share/CACHEDEV1_DATA/Container/.../volumes/744c.../_data:/app/recordings
   ```
-  或改用环境变量（不写死路径，通用性更好）：
-  ```yaml
-  volumes:
-    - ${RECORDINGS_HOST_PATH:-./recordings}:/app/recordings
-  ```
-  然后启动：`RECORDINGS_HOST_PATH=/Container/.../_data docker compose up -d`（或把变量写进同目录 `.env`）。
-- **方式二（QNAP Container Station UI）**：容器"设置 → 卷"，将录制卷的"主机路径"改为 NAS 真实目录（如 `/Container/.../_data`），"容器路径"保持 `/app/recordings`，应用并重建容器。
-- 系统设置里 `output_dir` 始终填容器内的挂载点 `/app/recordings`（或其子目录）。只要该挂载点来源是 NAS 目录，文件即直写 NAS，不占容器磁盘。
+  或在 Container Station UI 的"卷"里把主机路径改为该 NAS 目录、容器路径保持 `/app/recordings`，应用并重建容器。
+- 系统设置里 `output_dir` 始终填容器内的挂载点 `/app/recordings`（或其子目录）。只要该挂载点来源是 NAS 卷，文件即直写 NAS，不占容器磁盘。
 
 ---
 

@@ -313,7 +313,7 @@
                         <label>录制输出目录</label>
                         <input id="set_output_dir" class="input" type="text" placeholder="/app/recordings" oninput="updateFilenamePreview()" />
                         <div class="form-hint">📁 此路径为<strong>容器内部路径</strong>，请填写容器内<strong>已挂载</strong>的目录（默认 <code>/app/recordings</code>，或子目录如 <code>/app/recordings/douyin</code>）。<br/>
-<strong>NAS / 容器磁盘较小时</strong>：在部署时把宿主机(NAS)的大容量目录以卷形式挂到容器内的 <code>/app/recordings</code>——例如在 <code>docker-compose.yml</code> 写 <code>/Container/.../volumes/.../_data:/app/recordings</code>，或在 Container Station 的"卷"里把主机路径改为该 NAS 目录——这里仍填 <code>/app/recordings</code>，文件即直接落到 NAS，不占容器磁盘。<br/>
+<strong>NAS / 容器磁盘较小时</strong>：使用 named volume 即可——Docker 会自动在 NAS 盘的 Docker 卷目录（数据根目录位于 NAS 存储池）创建录制卷，<code>docker compose up</code> 部署完即用，文件直接落 NAS，不占容器磁盘（与 bililiverecorder 行为一致）；也可在 <code>docker-compose.yml</code> 把宿主机 NAS 目录 bind 到 <code>/app/recordings</code>，或在 Container Station"卷"里改主机路径为 NAS 目录。<br/>
 <em>关键：只要挂载点的来源是 NAS 目录，填 <code>/app/recordings</code> 写出的文件就是存在 NAS 上；切勿填容器内不存在的路径（会落到临时层、重建即丢）。</em></div>
                     </div>
                     <div class="form-group">
