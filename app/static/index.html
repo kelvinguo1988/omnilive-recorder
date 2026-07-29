@@ -312,7 +312,9 @@
                     <div class="form-group">
                         <label>录制输出目录</label>
                         <input id="set_output_dir" class="input" type="text" placeholder="/app/recordings" oninput="updateFilenamePreview()" />
-                        <div class="form-hint">⚠️ 此路径为<strong>容器内部路径</strong>。NAS 存储卷已挂载在容器内的 <code>/app/recordings</code>，请填写 <code>/app/recordings</code> 或其子目录（如 <code>/app/recordings/douyin</code>）。<strong>不要填写 NAS 主机上的卷路径</strong>（形如 <code>/Container/.../volumes/.../_data</code>），否则文件会写进容器临时层、不会落到 NAS 卷，且容器重建后丢失。</div>
+                        <div class="form-hint">📁 此路径为<strong>容器内部路径</strong>，请填写容器内<strong>已挂载</strong>的目录（默认 <code>/app/recordings</code>，或子目录如 <code>/app/recordings/douyin</code>）。<br/>
+<strong>NAS / 容器磁盘较小时</strong>：在部署时把宿主机(NAS)的大容量目录以卷形式挂到容器内的 <code>/app/recordings</code>——例如在 <code>docker-compose.yml</code> 写 <code>/Container/.../volumes/.../_data:/app/recordings</code>，或在 Container Station 的"卷"里把主机路径改为该 NAS 目录——这里仍填 <code>/app/recordings</code>，文件即直接落到 NAS，不占容器磁盘。<br/>
+<em>关键：只要挂载点的来源是 NAS 目录，填 <code>/app/recordings</code> 写出的文件就是存在 NAS 上；切勿填容器内不存在的路径（会落到临时层、重建即丢）。</em></div>
                     </div>
                     <div class="form-group">
                         <label>输出文件名模板</label>

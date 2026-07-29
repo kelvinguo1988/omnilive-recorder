@@ -93,6 +93,24 @@ docker run -d \
 
 > 建议挂载 `recordings`、`data`、`config` 三个卷，保证录制文件与数据库在容器重建后不丢失。
 
+### NAS / 小容器磁盘部署（推荐）
+
+容器自身分配磁盘通常较小，长时间录制建议把文件直接落到 NAS 大容量卷：
+
+- **方式一（命令行 compose）**：把录制卷改为绑定宿主机 NAS 目录：
+  ```yaml
+  volumes:
+    - /Container/container-station-data/lib/docker/volumes/744c.../_data:/app/recordings
+  ```
+  或改用环境变量（不写死路径，通用性更好）：
+  ```yaml
+  volumes:
+    - ${RECORDINGS_HOST_PATH:-./recordings}:/app/recordings
+  ```
+  然后启动：`RECORDINGS_HOST_PATH=/Container/.../_data docker compose up -d`（或把变量写进同目录 `.env`）。
+- **方式二（QNAP Container Station UI）**：容器"设置 → 卷"，将录制卷的"主机路径"改为 NAS 真实目录（如 `/Container/.../_data`），"容器路径"保持 `/app/recordings`，应用并重建容器。
+- 系统设置里 `output_dir` 始终填容器内的挂载点 `/app/recordings`（或其子目录）。只要该挂载点来源是 NAS 目录，文件即直写 NAS，不占容器磁盘。
+
 ---
 
 ## 🔧 配置
@@ -109,7 +127,7 @@ docker run -d \
 | `filename_template` | 输出文件名模板，支持占位符（见下） | `{streamer}_{time}` |
 | `max_retries` | 录制失败最大重试次数 | `3` |
 | `output_dir` | 录制输出根目录（实际文件位于 `{output_dir}/{平台}/{主播}/{日期}/` 下） | `/app/recordings` |
-| ⚠️ 路径说明 | `output_dir` 必须是**容器内部路径**。NAS/Docker 的存储卷挂载在容器内的 `/app/recordings`，请填 `/app/recordings` 或其子目录；**不要填 NAS 主机上的卷物理路径**（形如 `/Container/.../volumes/.../_data`），否则文件会写进容器临时层、不落盘且重建即丢 | — |
+| ⚠️ 路径说明 | `output_dir` 填**容器内部已挂载的目录**（默认 `/app/recordings`）。能否落 NAS 取决于部署时该目录是否绑定到 NAS 卷：把宿主机 NAS 目录以卷形式挂到 `/app/recordings`（如 compose 写 `/Container/.../volumes/.../_data:/app/recordings`，或 Container Station "卷"里改主机路径为 NAS 目录），此处填 `/app/recordings` 即可直写 NAS、不占容器磁盘；切勿填容器内不存在的路径（会落到临时层、重建即丢） | — |
 | `douyin_cookie` | 抖音 Cookie（提高解析成功率，可选） | 空 |
 | `bilibili_cookie` | B站 Cookie（**可选**；留空则自动获取游客 buvid3 绕过风控。原画 `qn=10000` 需带游客标识才能拿到流地址） | 空 |
 | `kuaishou_cookie` | 快手 Cookie（可选；公共直播间通常无需登录态，仅个别受限网络手动填写） | 空 |
