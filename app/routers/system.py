@@ -1,9 +1,12 @@
 """系统状态API"""
+import json
 import psutil
 import platform
 import os
+from datetime import datetime
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -159,6 +162,24 @@ async def update_settings(data: SettingsUpdate):
         k: v for k, v in data.model_dump(exclude_unset=True).items()
         if v is not None
     }
+    return await _apply_settings(updates)
+
+
+@router.post("/settings/import")
+async def import_settings(data: dict):
+    """从 JSON 批量导入系统设置（用于备份 / 迁移）
+
+    仅接受已知设置字段；布尔值为 false 时也保留（不会被过滤）。
+    """
+    known = set(SettingsUpdate.model_fields.keys())
+    updates = {k: v for k, v in data.items() if k in known and v is not None}
+    if not updates:
+        raise HTTPException(status_code=400, detail="未提供任何有效的设置项")
+    return await _apply_settings(updates)
+
+
+async def _apply_settings(updates: dict):
+    """校验 + 应用 + 持久化设置（PUT 与 import 共用）"""
     if not updates:
         raise HTTPException(status_code=400, detail="未提供任何要更新的设置项")
 
@@ -245,3 +266,39 @@ async def update_settings(data: SettingsUpdate):
             "kuaishou_cookie": settings.kuaishou_cookie,
         },
     }
+
+
+@router.get("/settings/export")
+async def export_settings():
+    """导出当前系统设置为 JSON（备份 / 迁移用）"""
+    s = settings
+    data = {
+        "version": 1,
+        "type": "omnilive-settings",
+        "exported_at": datetime.utcnow().isoformat(),
+        "settings": {
+            "record_format": s.record_format,
+            "video_quality": s.video_quality,
+            "segment_time": s.segment_time,
+            "max_retries": s.max_retries,
+            "retry_delay": s.retry_delay,
+            "monitor_interval": s.monitor_interval,
+            "check_timeout": s.check_timeout,
+            "output_dir": s.output_dir,
+            "max_disk_usage": s.max_disk_usage,
+            "filename_template": s.filename_template,
+            "enable_notification": s.enable_notification,
+            "webhook_url": s.webhook_url,
+            "enable_proxy": s.enable_proxy,
+            "proxy_addr": s.proxy_addr,
+            "douyin_cookie": s.douyin_cookie,
+            "bilibili_cookie": s.bilibili_cookie,
+            "kuaishou_cookie": s.kuaishou_cookie,
+        },
+    }
+    body = json.dumps(data, ensure_ascii=False, indent=2)
+    return Response(
+        content=body,
+        media_type="application/json",
+        headers={"Content-Disposition": "attachment; filename=settings_export.json"},
+    )

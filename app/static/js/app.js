@@ -555,6 +555,101 @@ function updateFilenamePreview() {
     }
 }
 
+// 导入 / 导出辅助
+function dateStr() {
+    const d = new Date();
+    return d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0');
+}
+
+async function fetchText(url) {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error('请求失败: ' + r.status);
+    return r.text();
+}
+
+function downloadText(content, filename, mime = 'application/json') {
+    const blob = new Blob([content], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+}
+
+// 房间管理：导出
+async function exportRooms() {
+    try {
+        const text = await fetchText('/api/rooms/export');
+        downloadText(text, 'rooms_export_' + dateStr() + '.json');
+        showToast('房间已导出', 'success');
+    } catch (e) {
+        console.error('Export rooms error:', e);
+        showToast('导出失败', 'error');
+    }
+}
+
+// 房间管理：从文件导入
+async function importRoomsFromFile(input) {
+    const file = input.files[0];
+    if (!file) return;
+    try {
+        const text = await file.text();
+        const data = JSON.parse(text);
+        const rooms = Array.isArray(data) ? data : (data.rooms || []);
+        if (!rooms.length) {
+            showToast('文件中没有房间数据', 'error');
+            return;
+        }
+        const res = await API.post('/api/rooms/import', { rooms });
+        showToast(res.message || `导入完成：新增 ${res.imported}`, res.failed ? 'error' : 'success');
+        if (res.errors && res.errors.length) console.warn('房间导入错误:', res.errors);
+        loadRooms();
+    } catch (e) {
+        console.error('Import rooms error:', e);
+        showToast('导入失败：文件格式错误', 'error');
+    } finally {
+        input.value = '';
+    }
+}
+
+// 系统设置：导出
+async function exportSettings() {
+    try {
+        const text = await fetchText('/api/system/settings/export');
+        downloadText(text, 'settings_export_' + dateStr() + '.json');
+        showToast('设置已导出', 'success');
+    } catch (e) {
+        console.error('Export settings error:', e);
+        showToast('导出失败', 'error');
+    }
+}
+
+// 系统设置：从文件导入
+async function importSettingsFromFile(input) {
+    const file = input.files[0];
+    if (!file) return;
+    try {
+        const text = await file.text();
+        const data = JSON.parse(text);
+        const payload = data.settings ? data.settings : data;
+        const res = await API.post('/api/system/settings/import', payload);
+        if (res.success) {
+            showToast('设置已导入并生效', 'success');
+            await loadSettings();
+        } else {
+            showToast('导入失败: ' + (res.detail || '未知错误'), 'error');
+        }
+    } catch (e) {
+        console.error('Import settings error:', e);
+        showToast('导入失败：文件格式错误', 'error');
+    } finally {
+        input.value = '';
+    }
+}
+
 // 初始化
 document.addEventListener('DOMContentLoaded', () => {
     refreshDashboard();

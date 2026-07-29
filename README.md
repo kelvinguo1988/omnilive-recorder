@@ -157,10 +157,14 @@ export LIVE_RECORDER_KUAISHOU_COOKIE="did=xxxx; clientid=xxxx"
 | POST | `/api/rooms/{id}/check` | 手动检测房间 |
 | POST | `/api/rooms/{id}/start-recording` | 手动开始录制 |
 | POST | `/api/rooms/{id}/stop-recording` | 手动停止录制 |
+| GET | `/api/rooms/export` | 导出全部房间为 JSON（备份 / 迁移） |
+| POST | `/api/rooms/import` | 从 JSON 批量导入房间（自动跳过已存在 URL） |
 | GET | `/api/recordings` | 录制记录列表（含 `part_count` 断流重连分片数） |
 | GET | `/api/recordings/stats` | 录制统计 |
 | GET | `/api/system/info` | 系统信息（含当前全部设置） |
 | PUT | `/api/system/settings` | 更新系统设置（可视化设置页的保存动作，立即生效并持久化） |
+| GET | `/api/system/settings/export` | 导出当前系统设置为 JSON（备份 / 迁移） |
+| POST | `/api/system/settings/import` | 从 JSON 批量导入系统设置 |
 | GET | `/api/system/platforms` | 支持的平台列表 |
 | GET | `/api/system/logs` | 系统日志 |
 | GET | `/api/files` | 文件列表 |

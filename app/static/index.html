@@ -143,7 +143,12 @@
         <div id="page-rooms" class="page">
             <header class="page-header">
                 <h1>房间管理</h1>
-                <button class="btn btn-primary" onclick="showAddRoomModal()">+ 添加房间</button>
+                <div class="page-header-actions">
+                    <button class="btn btn-secondary" onclick="document.getElementById('roomsImportFile').click()">导入</button>
+                    <button class="btn btn-secondary" onclick="exportRooms()">导出</button>
+                    <button class="btn btn-primary" onclick="showAddRoomModal()">+ 添加房间</button>
+                </div>
+                <input type="file" id="roomsImportFile" accept="application/json,.json" style="display:none" onchange="importRoomsFromFile(this)" />
             </header>
             <div class="card">
                 <div class="card-body">
@@ -241,10 +246,13 @@
         <div id="page-settings" class="page">
             <header class="page-header">
                 <h1>系统设置</h1>
-                <div>
+                <div class="page-header-actions">
+                    <button class="btn btn-secondary" onclick="document.getElementById('settingsImportFile').click()">导入</button>
+                    <button class="btn btn-secondary" onclick="exportSettings()">导出</button>
                     <button class="btn btn-secondary" onclick="resetSettingsForm()">重置</button>
                     <button class="btn btn-primary" onclick="saveSettings(event)">保存设置</button>
                 </div>
+                <input type="file" id="settingsImportFile" accept="application/json,.json" style="display:none" onchange="importSettingsFromFile(this)" />
             </header>
 
             <div class="card">

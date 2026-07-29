@@ -2,10 +2,11 @@
 import json
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi.responses import Response
 from sqlalchemy import select, update, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 from app.database import get_db
 from app.models import Room, Recording
 from app.services.platform import PlatformFactory
@@ -20,12 +21,27 @@ class RoomCreate(BaseModel):
     quality: str = "origin"
     enabled: bool = True
     remark: Optional[str] = None
+    streamer_name: Optional[str] = None
 
 
 class RoomUpdate(BaseModel):
     quality: Optional[str] = None
     enabled: Optional[bool] = None
     remark: Optional[str] = None
+
+
+class RoomImportItem(BaseModel):
+    """单个房间导入项（与导出格式对齐）"""
+    url: str
+    platform: Optional[str] = None
+    quality: Optional[str] = "origin"
+    enabled: Optional[bool] = True
+    remark: Optional[str] = None
+    streamer_name: Optional[str] = None
+
+
+class RoomsImport(BaseModel):
+    rooms: List[RoomImportItem]
 
 
 @router.get("")
@@ -76,6 +92,7 @@ async def create_room(room: RoomCreate, background_tasks: BackgroundTasks, db: A
         quality=room.quality,
         enabled=room.enabled,
         remark=room.remark,
+        streamer_name=room.streamer_name,
     )
     db.add(new_room)
     await db.commit()
@@ -89,6 +106,90 @@ async def create_room(room: RoomCreate, background_tasks: BackgroundTasks, db: A
         "url": new_room.url,
         "platform": new_room.platform,
         "message": "添加成功，正在检测直播状态...",
+    }
+
+
+@router.get("/export")
+async def export_rooms(db: AsyncSession = Depends(get_db)):
+    """导出所有房间为 JSON（备份 / 迁移用）"""
+    result = await db.execute(select(Room).order_by(Room.id))
+    rooms = result.scalars().all()
+    data = {
+        "version": 1,
+        "type": "omnilive-rooms",
+        "exported_at": datetime.utcnow().isoformat(),
+        "count": len(rooms),
+        "rooms": [
+            {
+                "url": r.url,
+                "platform": r.platform,
+                "quality": r.quality,
+                "enabled": r.enabled,
+                "remark": r.remark,
+                "streamer_name": r.streamer_name or "",
+            }
+            for r in rooms
+        ],
+    }
+    body = json.dumps(data, ensure_ascii=False, indent=2)
+    return Response(
+        content=body,
+        media_type="application/json",
+        headers={"Content-Disposition": "attachment; filename=rooms_export.json"},
+    )
+
+
+@router.post("/import")
+async def import_rooms(payload: RoomsImport, db: AsyncSession = Depends(get_db)):
+    """从 JSON 批量导入房间（跳过已存在的 URL）"""
+    imported = 0
+    skipped = 0
+    failed = 0
+    errors = []
+
+    for item in payload.rooms:
+        url = (item.url or "").strip()
+        if not url:
+            failed += 1
+            errors.append("空 URL，已跳过")
+            continue
+
+        platform = item.platform
+        if not platform:
+            platform = PlatformFactory.detect_platform(url)
+            if not platform:
+                failed += 1
+                errors.append(f"{url}: 无法识别平台")
+                continue
+
+        existing = await db.execute(select(Room).where(Room.url == url))
+        if existing.scalar_one_or_none():
+            skipped += 1
+            continue
+
+        try:
+            room = Room(
+                url=url,
+                platform=platform,
+                quality=item.quality or "origin",
+                enabled=bool(item.enabled) if item.enabled is not None else True,
+                remark=item.remark,
+                streamer_name=item.streamer_name or None,
+            )
+            db.add(room)
+            await db.commit()
+            imported += 1
+        except Exception as e:
+            await db.rollback()
+            failed += 1
+            errors.append(f"{url}: {e}")
+
+    return {
+        "imported": imported,
+        "skipped": skipped,
+        "failed": failed,
+        "errors": errors[:20],
+        "message": f"导入完成：新增 {imported}，跳过 {skipped}，失败 {failed}",
     }
 
 
