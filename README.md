@@ -109,6 +109,7 @@ docker run -d \
 | `filename_template` | 输出文件名模板，支持占位符（见下） | `{streamer}_{time}` |
 | `max_retries` | 录制失败最大重试次数 | `3` |
 | `output_dir` | 录制输出根目录（实际文件位于 `{output_dir}/{平台}/{主播}/{日期}/` 下） | `/app/recordings` |
+| ⚠️ 路径说明 | `output_dir` 必须是**容器内部路径**。NAS/Docker 的存储卷挂载在容器内的 `/app/recordings`，请填 `/app/recordings` 或其子目录；**不要填 NAS 主机上的卷物理路径**（形如 `/Container/.../volumes/.../_data`），否则文件会写进容器临时层、不落盘且重建即丢 | — |
 | `douyin_cookie` | 抖音 Cookie（提高解析成功率，可选） | 空 |
 | `bilibili_cookie` | B站 Cookie（**可选**；留空则自动获取游客 buvid3 绕过风控。原画 `qn=10000` 需带游客标识才能拿到流地址） | 空 |
 | `kuaishou_cookie` | 快手 Cookie（可选；公共直播间通常无需登录态，仅个别受限网络手动填写） | 空 |

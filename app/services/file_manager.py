@@ -15,8 +15,14 @@ logger = logging.getLogger(__name__)
 class FileManager:
     """录制文件管理"""
 
-    def __init__(self):
-        self.output_dir = settings.output_dir
+    @property
+    def output_dir(self):
+        """实时读取全局配置的输出目录
+
+        避免模块加载时缓存 output_dir，导致通过 Web 设置页修改输出目录后，
+        文件管理仍在读取旧路径（与录制写入路径不一致，表现为「有记录无文件」）。
+        """
+        return settings.output_dir
 
     def get_file_list(self, platform: str = None, streamer: str = None) -> list:
         """获取文件列表"""
