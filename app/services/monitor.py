@@ -181,6 +181,7 @@ class LiveMonitor:
             segment_time=settings.segment_time,
             template=settings.filename_template,
             title=info.title,
+            remark=room.remark,
         )
 
         result = await recorder.start_recording(

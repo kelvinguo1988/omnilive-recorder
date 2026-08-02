@@ -29,7 +29,7 @@ class FFmpegRecorder:
         return name[:100] if name else "untitled"
 
     def _build_base_name(self, platform: str, streamer_name: str, room_id: str,
-                         template: str = None, title: str = None) -> str:
+                         template: str = None, title: str = None, remark: str = None) -> str:
         """根据文件名模板生成基础文件名（不含扩展名）。
 
         支持的占位符：
@@ -37,6 +37,7 @@ class FFmpegRecorder:
           {room_id}   房间 ID
           {platform}  平台中文名（抖音/B站/快手）
           {title}     直播标题（清洗后）
+          {remark}    添加房间时填写的备注（无则留空）
           {date}      日期 YYYY-MM-DD
           {time}      时间 HHMMSS
           {datetime}  日期时间 YYYYMMDD_HHMMSS
@@ -54,6 +55,7 @@ class FFmpegRecorder:
             "room_id": self._sanitize_filename(room_id) if room_id else "",
             "platform": platform_cn,
             "title": self._sanitize_filename(title) if title else "",
+            "remark": self._sanitize_filename(remark) if remark else "",
             "date": now.strftime("%Y-%m-%d"),
             "time": now.strftime("%H%M%S"),
             "datetime": now.strftime("%Y%m%d_%H%M%S"),
@@ -70,7 +72,7 @@ class FFmpegRecorder:
 
     def _get_output_path(self, platform: str, streamer_name: str, room_id: str,
                          record_format: str = None, template: str = None,
-                         title: str = None) -> tuple[str, str]:
+                         title: str = None, remark: str = None) -> tuple[str, str]:
         """获取输出文件路径（自动命名，用于未显式指定 output_path 时的兜底）"""
         fmt = record_format or settings.record_format
         now = datetime.now()
@@ -86,7 +88,7 @@ class FFmpegRecorder:
         dir_path = os.path.join(settings.output_dir, platform_cn, streamer, date_str)
         os.makedirs(dir_path, exist_ok=True)
 
-        base = self._build_base_name(platform, streamer_name, room_id, template=template, title=title)
+        base = self._build_base_name(platform, streamer_name, room_id, template=template, title=title, remark=remark)
         filename = f"{base}.{fmt}"
         file_path = os.path.join(dir_path, filename)
 
@@ -95,7 +97,7 @@ class FFmpegRecorder:
     def build_session_target(self, platform: str, streamer_name: str, room_id: str,
                              part_index: int = 1, record_format: str = None,
                              segment_time: int = None, template: str = None,
-                             title: str = None) -> tuple[str, str]:
+                             title: str = None, remark: str = None) -> tuple[str, str]:
         """为一场所录制的某个 part 计算输出路径。
 
         返回 (final_path, part_target)：
@@ -121,7 +123,7 @@ class FFmpegRecorder:
         dir_path = os.path.join(settings.output_dir, platform_cn, streamer, date_str)
         os.makedirs(dir_path, exist_ok=True)
 
-        base = self._build_base_name(platform, streamer_name, room_id, template=template, title=title)
+        base = self._build_base_name(platform, streamer_name, room_id, template=template, title=title, remark=remark)
         final_path = os.path.join(dir_path, f"{base}.{fmt}")
         if seg and seg > 0 and fmt in ("ts", "mp4"):
             part_target = os.path.join(dir_path, f"{base}_part{part_index:03d}_%04d.{fmt}")
