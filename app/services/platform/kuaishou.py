@@ -90,12 +90,43 @@ class KuaishouPlatform(BasePlatform):
                             or detail.get("liveStreamName", "") or ""
                         cover = stream.get("coverUrl") or detail.get("coverUrl")
                         info.cover_url = cover.get("url", "") if isinstance(cover, dict) else (cover or "")
+                        # 快手 playUrls 结构随版本变化，需兼容多种形态
                         play_urls = stream.get("playUrls") or detail.get("playUrls")
-                        if play_urls and isinstance(play_urls, list):
-                            first = play_urls[0]
-                            urls = first.get("urls", []) if isinstance(first, dict) else []
-                            if urls:
-                                info.stream_url = urls[0].get("url", "") if isinstance(urls[0], dict) else urls[0]
+                        # 形态1: dict（h264/hevc -> adaptationSet.representation[].url）
+                        if isinstance(play_urls, dict):
+                            for codec in ("h264", "hevc"):
+                                node = play_urls.get(codec)
+                                if not isinstance(node, dict):
+                                    continue
+                                rep_set = node.get("adaptationSet", {})
+                                if isinstance(rep_set, dict):
+                                    for r in rep_set.get("representation", []):
+                                        if isinstance(r, dict) and r.get("url"):
+                                            info.stream_url = r["url"]
+                                            break
+                                if info.stream_url:
+                                    break
+                        # 形态2: list（旧版 urls[].url）
+                        if not info.stream_url and isinstance(play_urls, list):
+                            for item in play_urls:
+                                if not isinstance(item, dict):
+                                    continue
+                                for u in item.get("urls", []):
+                                    if isinstance(u, dict) and u.get("url"):
+                                        info.stream_url = u["url"]
+                                        break
+                                    if isinstance(u, str):
+                                        info.stream_url = u
+                                        break
+                                if info.stream_url:
+                                    break
+                        # 形态3: liveStream 直接字段兜底
+                        if not info.stream_url:
+                            for key in ("hlsPlayUrl", "url"):
+                                direct = stream.get(key)
+                                if isinstance(direct, str) and direct.startswith("http"):
+                                    info.stream_url = direct
+                                    break
                     author = detail.get("author", {}) or {}
                     if isinstance(author, dict):
                         info.streamer_name = author.get("name", "") or author.get("kwaiId", "")
