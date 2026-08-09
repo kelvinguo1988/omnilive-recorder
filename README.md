@@ -141,6 +141,10 @@ docker run -d \
 > **B站 Cookie 说明**：B站裸请求会被风控拦截（`code=-352`），必须带一个真实有效的 `buvid3` 游客标识。**默认（留空）会自动访问 `bilibili.com` 获取游客 `buvid3`**，无需登录即可录制原画；若自动获取仍被风控，可在「系统设置 → B站 Cookie」手动粘贴浏览器中的 `buvid3` / `SESSDATA` 等。
 >
 > **快手 Cookie 说明**：快手现已对游客态接口做风控拦截（`live_graphql` 返回 `{"result":1,"message":"活动结束啦~"}`，页面注水 `playList` 为占位空壳）。**快手必须填写登录态 Cookie（`kuaishou_cookie`）才能检测直播与录制**——与抖音、B站不同，快手没有可用的游客态自动绕过。在浏览器登录 `live.kuaishou.com` 后，从开发者工具复制请求 Cookie 粘贴到「系统设置 → 快手 Cookie」即可。
+>
+> **快手直播间地址格式**：快手房间地址**必须是 `https://live.kuaishou.com/u/<ID>` 形式**（含 `/u/` 路径）。缺少 `/u/` 会落到错误页、页面注水无 `liveroom` 节点，导致永远判定「未开播」。地址直接取浏览器直播页地址栏即可。
+>
+> **快手检测原理（已加固并端到端实测）**：适配器优先解析页面注水 `window.__INITIAL_STATE__`（兼容旧版 `__APOLLO_STATE__`），对含 JS 字面量（`undefined`/`NaN`/`Infinity`）的非标准 JSON 做预处理后再解析；从 `liveroom.playList[0]` 提取 `isLiving` / 主播名 / 流地址，兼容 `playUrls` 为 **dict**（`h264`/`hevc` → `adaptationSet.representation`）与 **list** 两种形态，并兜底 `liveStream.hlsPlayUrl` / `url`。带登录 Cookie 时端到端实测可成功拉起 FFmpeg 录制（验证样本：主播「旺仔小馒头🍩」开播状态与 `.flv` 流地址均正确解析、6 秒实录 1.69 MB）。无 Cookie（游客态）则 `isLiving=False`、无主播名 / 流地址——印证 Cookie 必需。
 
 **输出文件名模板 `filename_template` 占位符**：
 
@@ -178,7 +182,7 @@ export LIVE_RECORDER_KUAISHOU_COOKIE="did=xxxx; clientid=xxxx"
 | GET | `/api/health` | 健康检查 |
 | GET | `/api/rooms` | 房间列表 |
 | POST | `/api/rooms` | 添加房间（自动识别平台） |
-| PUT | `/api/rooms/{id}` | 更新房间 |
+| PUT | `/api/rooms/{id}` | 更新房间（支持改 `url`/`platform`，自动重算 `room_id` 并清空适配器缓存） |
 | DELETE | `/api/rooms/{id}` | 删除房间 |
 | POST | `/api/rooms/{id}/check` | 手动检测房间 |
 | POST | `/api/rooms/{id}/start-recording` | 手动开始录制 |
