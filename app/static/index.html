@@ -364,9 +364,9 @@
                         <div class="form-hint">留空时自动访问 bilibili.com 获取游客 buvid3（绕过 -352 风控，原画可录）。如遇风控可手动粘贴浏览器 Cookie</div>
                     </div>
                     <div class="form-group">
-                        <label>快手 Cookie（可选，公共直播间通常无需）</label>
+                        <label>快手 Cookie（必填，否则检测不到直播）</label>
                         <textarea id="set_kuaishou_cookie" class="input" rows="3" style="resize:vertical;font-family:monospace" placeholder="例如: did=xxxx; clientid=xxxx; kuaishou.server.web_st=xxxx"></textarea>
-                        <div class="form-hint">公共直播间一般无需登录态；仅在个别受限网络录制失败时可手动粘贴浏览器 Cookie</div>
+                        <div class="form-hint">⚠️ 快手现已对游客态接口做风控拦截，<strong>必须填写登录态 Cookie 才能检测直播与录制</strong>。在浏览器登录 live.kuaishou.com 后，从开发者工具复制 Cookie 粘贴此处。</div>
                     </div>
                 </div>
             </div>

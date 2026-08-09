@@ -135,10 +135,12 @@ docker run -d \
 | ⚠️ 路径说明 | `output_dir` 填**容器内部已挂载的目录**（默认 `/app/recordings`）。能否落 NAS 取决于部署时该目录是否绑定到 NAS 卷：把宿主机 NAS 目录以卷形式挂到 `/app/recordings`（如 compose 写 `/Container/.../volumes/.../_data:/app/recordings`，或 Container Station "卷"里改主机路径为 NAS 目录），此处填 `/app/recordings` 即可直写 NAS、不占容器磁盘；切勿填容器内不存在的路径（会落到临时层、重建即丢） | — |
 | `douyin_cookie` | 抖音 Cookie（提高解析成功率，可选） | 空 |
 | `bilibili_cookie` | B站 Cookie（**可选**；留空则自动获取游客 buvid3 绕过风控。原画 `qn=10000` 需带游客标识才能拿到流地址） | 空 |
-| `kuaishou_cookie` | 快手 Cookie（可选；公共直播间通常无需登录态，仅个别受限网络手动填写） | 空 |
+| `kuaishou_cookie` | 快手 Cookie（**必填**；快手现已对游客态接口风控拦截，不填则检测不到直播、无法录制） | 空 |
 | `enable_proxy` / `proxy_addr` | 代理开关与地址（海外/受限网络可用） | 关闭 |
 
-> **B站 Cookie 说明**：B站裸请求会被风控拦截（`code=-352`），必须带一个真实有效的 `buvid3` 游客标识。**默认（留空）会自动访问 `bilibili.com` 获取游客 `buvid3`**，无需登录即可录制原画；若自动获取仍被风控，可在「系统设置 → B站 Cookie」手动粘贴浏览器中的 `buvid3` / `SESSDATA` 等。快手公共直播间一般无需 Cookie，仅在受限网络失败时可手动填写。
+> **B站 Cookie 说明**：B站裸请求会被风控拦截（`code=-352`），必须带一个真实有效的 `buvid3` 游客标识。**默认（留空）会自动访问 `bilibili.com` 获取游客 `buvid3`**，无需登录即可录制原画；若自动获取仍被风控，可在「系统设置 → B站 Cookie」手动粘贴浏览器中的 `buvid3` / `SESSDATA` 等。
+>
+> **快手 Cookie 说明**：快手现已对游客态接口做风控拦截（`live_graphql` 返回 `{"result":1,"message":"活动结束啦~"}`，页面注水 `playList` 为占位空壳）。**快手必须填写登录态 Cookie（`kuaishou_cookie`）才能检测直播与录制**——与抖音、B站不同，快手没有可用的游客态自动绕过。在浏览器登录 `live.kuaishou.com` 后，从开发者工具复制请求 Cookie 粘贴到「系统设置 → 快手 Cookie」即可。
 
 **输出文件名模板 `filename_template` 占位符**：
 
