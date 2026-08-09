@@ -25,6 +25,8 @@ class RoomCreate(BaseModel):
 
 
 class RoomUpdate(BaseModel):
+    url: Optional[str] = None
+    platform: Optional[str] = None
     quality: Optional[str] = None
     enabled: Optional[bool] = None
     remark: Optional[str] = None
@@ -204,6 +206,29 @@ async def update_room(room_id: int, room: RoomUpdate, db: AsyncSession = Depends
     existing = result.scalar_one_or_none()
     if not existing:
         raise HTTPException(status_code=404, detail="房间不存在")
+
+    # 修改 URL 时同步重算 room_id 与平台（用于文件名 / 适配器选择）
+    if "url" in update_data and update_data["url"]:
+        new_url = update_data["url"].strip()
+        if not update_data.get("platform"):
+            detected = PlatformFactory.detect_platform(new_url)
+            if detected:
+                update_data["platform"] = detected
+        from app.services.platform.base import PlatformFactory as _PF
+        rid = _PF.get_platform(update_data.get("platform") or existing.platform)
+        if rid is None:
+            # 退而用通用正则提取
+            import re as _re
+            m = _re.search(r'live\.kuaishou\.com/u/(\w+)|live\.kuaishou\.com/(\w+)|live\.douyin\.com/(\d+)|live\.bilibili\.com/(\d+)', new_url)
+            update_data["room_id"] = (m.group(1) or m.group(2) or m.group(3) or m.group(4) or "") if m else ""
+        else:
+            update_data["room_id"] = rid.extract_room_id(new_url)
+        # 清空已缓存的平台适配器实例，下次检查按新 URL/平台重建
+        try:
+            from app.services.monitor import monitor
+            monitor._platform_instances.clear()
+        except Exception:
+            pass
 
     await db.execute(update(Room).where(Room.id == room_id).values(**update_data))
     await db.commit()

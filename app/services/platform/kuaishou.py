@@ -41,7 +41,9 @@ class KuaishouPlatform(BasePlatform):
         info.room_id = room_id
 
         try:
-            live_url = f"https://live.kuaishou.com/{room_id}"
+            # 必须使用原直播间 URL（含 /u/ 路径），拼成 live.kuaishou.com/{id}
+            # 会落到错误页面，__INITIAL_STATE__ 无 liveroom 节点，永远取不到直播状态
+            live_url = f"https://live.kuaishou.com/u/{room_id}"
 
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -57,14 +59,18 @@ class KuaishouPlatform(BasePlatform):
 
             # 快手新版页面数据在 window.__INITIAL_STATE__（旧版为 __APOLLO_STATE__）
             apollo_match = re.search(
-                r'window\.__INITIAL_STATE__\s*=\s*({.*?});', text, re.DOTALL
+                r'window\.__INITIAL_STATE__\s*=\s*(\{.*?\})\s*;', text, re.DOTALL
             ) or re.search(
-                r'window\.__APOLLO_STATE__\s*=\s*({.*?});', text, re.DOTALL
+                r'window\.__APOLLO_STATE__\s*=\s*(\{.*?\})\s*;', text, re.DOTALL
             )
 
             if apollo_match:
                 try:
-                    apollo_data = json.loads(apollo_match.group(1))
+                    raw = apollo_match.group(1)
+                    # 快手注水含 JS 字面量（undefined/NaN/Infinity），非法 JSON，预处理为 null
+                    raw = re.sub(r':\s*undefined\b', ': null', raw)
+                    raw = re.sub(r':\s*(NaN|Infinity|-Infinity)\b', ': null', raw)
+                    apollo_data = json.loads(raw)
                 except json.JSONDecodeError:
                     apollo_data = {}
 
