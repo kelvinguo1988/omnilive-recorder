@@ -28,7 +28,8 @@ class BasePlatform(ABC):
 
     def __init__(self, proxy: str = "", cookie: str = "", timeout: int = 15):
         self.proxy = proxy
-        self.cookie = cookie
+        # Cookie 可能从 UI 粘贴带入首尾空白/换行，httpx 拒绝含换行符的 header 值，统一在此清理
+        self.cookie = cookie.strip() if cookie else ""
         self.timeout = timeout
         self.client = httpx.AsyncClient(
             timeout=httpx.Timeout(timeout, connect=10),
