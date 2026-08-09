@@ -165,12 +165,18 @@ class KuaishouPlatform(BasePlatform):
             if not info.stream_url and not info.is_live:
                 info = await self._get_info_from_api(room_id, info)
 
-            # 游客态接口已被快手风控拦截时，给出明确提示
-            if not info.stream_url and not info.is_live:
-                logger.warning(
-                    f"快手房间 {room_id} 未获取到直播状态：游客态接口已被快手风控拦截。"
-                    f"请在「系统设置 → 快手 Cookie」填写登录态 Cookie 后重试。"
-                )
+            # 完全没解析到任何主播/直播信息：区分"无Cookie(游客被风控)"与"Cookie失效"
+            if not info.streamer_name and not info.is_live and not info.stream_url:
+                if not self.cookie:
+                    logger.warning(
+                        f"快手房间 {room_id}: 未配置Cookie(游客态被风控), 无法检测直播/主播信息。"
+                        f"请在「系统设置 → 快手 Cookie」填写登录态 Cookie 后重试。"
+                    )
+                else:
+                    logger.warning(
+                        f"快手房间 {room_id}: 已带Cookie但仍未解析到任何信息, "
+                        f"可能Cookie已过期或主播当前未开播。可重新登录快手获取新Cookie后更新。"
+                    )
 
             logger.info(f"快手房间 {room_id}: 标题={info.title}, 直播中={info.is_live}")
 

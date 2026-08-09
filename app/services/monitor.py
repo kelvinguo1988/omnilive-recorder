@@ -26,25 +26,30 @@ class LiveMonitor:
         self._room_states: dict[int, dict] = {}
 
     def _get_platform(self, platform_name: str):
-        """获取平台适配器实例"""
-        if platform_name not in self._platform_instances:
-            cookie = ""
-            if platform_name == "douyin":
-                cookie = settings.douyin_cookie
-            elif platform_name == "bilibili":
-                cookie = settings.bilibili_cookie
-            elif platform_name == "kuaishou":
-                cookie = settings.kuaishou_cookie
-            proxy = settings.proxy_addr if settings.enable_proxy else ""
+        """获取平台适配器实例（cookie/proxy 变化则自动重建，避免缓存到过期空Cookie）"""
+        cookie = ""
+        if platform_name == "douyin":
+            cookie = settings.douyin_cookie
+        elif platform_name == "bilibili":
+            cookie = settings.bilibili_cookie
+        elif platform_name == "kuaishou":
+            cookie = settings.kuaishou_cookie
+        proxy = settings.proxy_addr if settings.enable_proxy else ""
 
-            instance = PlatformFactory.get_platform(
-                platform_name,
-                proxy=proxy,
-                cookie=cookie,
-                timeout=settings.check_timeout,
-            )
-            if instance:
-                self._platform_instances[platform_name] = instance
+        cached = self._platform_instances.get(platform_name)
+        # cookie 或 proxy 变化（或首次）→ 重建实例，使最新的 Cookie 立即生效
+        if cached is not None and getattr(cached, "cookie", None) == cookie \
+                and getattr(cached, "proxy", None) == proxy:
+            return cached
+
+        instance = PlatformFactory.get_platform(
+            platform_name,
+            proxy=proxy,
+            cookie=cookie,
+            timeout=settings.check_timeout,
+        )
+        if instance:
+            self._platform_instances[platform_name] = instance
 
         return self._platform_instances.get(platform_name)
 

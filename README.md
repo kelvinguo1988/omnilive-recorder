@@ -70,13 +70,17 @@ git clone https://github.com/<your-username>/omnilive-recorder.git
 cd omnilive-recorder
 
 # 启动（后台运行）
-docker compose up -d
+docker compose up -d --build
 
 # 查看日志
 docker compose logs -f
 ```
 
+> ⚠️ **代码更新后必须 `--build`**：修改过 Python 代码（如快手检测修复）后，一定要带 `--build` 重新构建镜像（`docker compose up -d --build`）。仅 `docker compose up -d` 会沿用旧镜像，导致新代码不生效、问题"依然复现"。
+
 打开浏览器访问 **http://localhost:8000** 即可使用。
+
+> ⚠️ **`data/` 是每台机器独立的**：`docker-compose.yml` 把宿主机 `./data` 挂进容器（`- ./data:/app/data`）。你在开发机（Mac）上添加的房间、写入的 Cookie，**不会**自动同步到 NAS 上的 `./data`。在 NAS 上部署时，请通过 NAS 的 Web 界面「房间管理」添加房间、「系统设置 → 快手 Cookie」粘贴 Cookie（或直接编辑 NAS 宿主机上的 `./data/runtime_config.ini`）。
 
 ### 2. 仅用 Docker 运行
 
