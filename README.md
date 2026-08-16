@@ -145,6 +145,8 @@ docker run -d \
 > **B站 Cookie 说明**：B站裸请求会被风控拦截（`code=-352`），必须带一个真实有效的 `buvid3` 游客标识。**默认（留空）会自动访问 `bilibili.com` 获取游客 `buvid3`**，无需登录即可录制原画；若自动获取仍被风控，可在「系统设置 → B站 Cookie」手动粘贴浏览器中的 `buvid3` / `SESSDATA` 等。
 >
 > **快手 Cookie 说明**：快手现已对游客态接口做风控拦截（`live_graphql` 返回 `{"result":1,"message":"活动结束啦~"}`，页面注水 `playList` 为占位空壳）。**快手必须填写登录态 Cookie（`kuaishou_cookie`）才能检测直播与录制**——与抖音、B站不同，快手没有可用的游客态自动绕过。在浏览器登录 `live.kuaishou.com` 后，从开发者工具复制请求 Cookie 粘贴到「系统设置 → 快手 Cookie」即可。
+
+> **抖音 Cookie 说明（关于「主播名」）**：抖音现已弃用页面 `RENDER_DATA` 注水，且游客态 `webcast/room/web/enter` 接口**不返回 `owner`（主播昵称）**——只有带**登录态 Cookie** 时才会返回。因此：游客态下**直播标题可正常获取、但主播名为空**，录制文件会按「房间 ID」命名（`{streamer}` 回退为房间 ID）；在「系统设置 → 抖音 Cookie」填写登录态 Cookie 后，主播名才会正确显示并用于文件名。仅想录制、不在意文件名带主播名时，抖音可不填 Cookie。
 >
 > **快手直播间地址格式**：快手房间地址**必须是 `https://live.kuaishou.com/u/<ID>` 形式**（含 `/u/` 路径）。缺少 `/u/` 会落到错误页、页面注水无 `liveroom` 节点，导致永远判定「未开播」。地址直接取浏览器直播页地址栏即可。
 >

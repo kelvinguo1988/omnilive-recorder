@@ -102,23 +102,39 @@ class DouyinPlatform(BasePlatform):
                         info.cover_url = cover.get("url_list", [""])[0] if cover.get("url_list") else ""
 
                     if info.is_live and not info.stream_url:
-                        info.stream_url = await self._get_stream_from_api(room_id)
+                        info.stream_url = await self._get_stream_from_api(room_id, info)
 
             else:
-                # 尝试通过API获取
-                info.stream_url = await self._get_stream_from_api(room_id)
-                if info.stream_url:
+                # 抖音已弃用 RENDER_DATA，游客态页面也不再服务端渲染房间信息；
+                # 统一走 webcast API。游客态接口会隐藏 owner（主播名），登录态 Cookie 才返回。
+                info.stream_url = await self._get_stream_from_api(room_id, info)
+                if info.stream_url and not info.is_live:
+                    # API 未明确返回 status 时的兜底：能拿到流地址即视为直播中
                     info.is_live = True
 
-            logger.info(f"抖音房间 {room_id}: 标题={info.title}, 直播中={info.is_live}, 有流地址={bool(info.stream_url)}")
+            logger.info(
+                f"抖音房间 {room_id}: 主播={info.streamer_name or '-'}, "
+                f"标题={info.title or '-'}, 直播中={info.is_live}, 有流地址={bool(info.stream_url)}"
+            )
+
+            # 游客态（无 Cookie）无法获取主播名，给出明确提示，避免一直按房间ID命名
+            if not info.streamer_name and not self.cookie:
+                logger.warning(
+                    f"抖音房间 {room_id} 未获取到主播名：游客态接口不返回 owner 昵称。"
+                    f"请在「系统设置 → 抖音 Cookie」填写登录态 Cookie 后重试（与快手同理）。"
+                )
 
         except Exception as e:
             logger.error(f"获取抖音房间信息失败 {url}: {e}")
 
         return info
 
-    async def _get_stream_from_api(self, room_id: str) -> str:
-        """通过API获取直播流地址"""
+    async def _get_stream_from_api(self, room_id: str, info: Optional["RoomInfo"] = None) -> str:
+        """通过API获取直播流地址，并回填标题/主播名（若传入 info）。
+
+        说明：抖音游客态接口不返回 owner（主播昵称），仅登录态 Cookie 才会返回；
+        标题字段游客态即可返回，因此无 Cookie 时标题也能拿到，主播名不行。
+        """
         try:
             ttwid = await self._get_ttwid()
             ms_token = await self._get_ms_token()
@@ -161,6 +177,21 @@ class DouyinPlatform(BasePlatform):
             if data.get("status_code") == 0:
                 room_data = data.get("data", {}).get("data", [{}])[0]
                 if room_data:
+                    if info is not None:
+                        # 标题：游客态接口也返回，直接回填
+                        if not info.title and room_data.get("title"):
+                            info.title = room_data.get("title")
+                        # 主播名：仅登录态(带 Cookie)接口才返回 owner，游客态 owner 为空
+                        owner = room_data.get("owner") or {}
+                        if isinstance(owner, dict):
+                            nick = owner.get("nickname", "")
+                            if nick and not info.streamer_name:
+                                info.streamer_name = nick
+                        # 以接口返回的直播状态为准（2=直播中）
+                        status = room_data.get("status")
+                        if status is not None:
+                            info.is_live = status == 2
+
                     stream_url_data = room_data.get("stream_url", {})
                     return self._extract_flv_stream(stream_url_data) or self._extract_hls_stream(stream_url_data)
 
