@@ -132,6 +132,7 @@ docker run -d \
 | --- | --- | --- |
 | `record_format` | 录制格式：`ts` / `flv` / `mp4` | `ts` |
 | `monitor_interval` | 监控检测间隔（秒） | `120` |
+| `stream_url_refresh_interval` | 录制中**流地址主动刷新间隔**（秒）。快手/B站/抖音拉流地址多为带 `txTime/txSecret` 的**短时效签名 URL**，过期后 ffmpeg 会断流「只录几分钟」。该循环在录制期间周期性重新探测最新流地址，若变化则在旧地址过期前用新地址重启 ffmpeg（续写同一场），消除断流与重连空白。设为 `0` 关闭（仅依赖断流重连）。建议 ≤ 120（短于常见签名有效期） | `90` |
 | `segment_time` | 分段时长（秒），`0` 为不分段。**仅 TS / MP4 生效**，FLV 始终单文件 | `1800` |
 | `filename_template` | 输出文件名模板，支持占位符（见下） | `{streamer}_{time}` |
 | `max_retries` | 录制失败最大重试次数 | `3` |

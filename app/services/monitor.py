@@ -21,9 +21,12 @@ class LiveMonitor:
 
     def __init__(self):
         self._task: Optional[asyncio.Task] = None
+        self._refresh_task: Optional[asyncio.Task] = None
         self._running = False
         self._platform_instances: dict = {}
         self._room_states: dict[int, dict] = {}
+        # 串行化所有重连/换地址操作，避免刷新循环与断流重连同时对同一房间重启 ffmpeg
+        self._reconnect_lock = asyncio.Lock()
 
     def _get_platform(self, platform_name: str):
         """获取平台适配器实例（cookie/proxy 变化则自动重建，避免缓存到过期空Cookie）"""
@@ -60,6 +63,7 @@ class LiveMonitor:
 
         self._running = True
         self._task = asyncio.create_task(self._monitor_loop())
+        self._refresh_task = asyncio.create_task(self._refresh_loop())
         logger.info("直播监控调度器已启动")
 
     async def stop(self):
@@ -71,6 +75,13 @@ class LiveMonitor:
                 await self._task
             except asyncio.CancelledError:
                 pass
+        if self._refresh_task:
+            self._refresh_task.cancel()
+            try:
+                await self._refresh_task
+            except asyncio.CancelledError:
+                pass
+        self._refresh_task = None
 
         # 停止所有录制
         for platform_instance in self._platform_instances.values():
@@ -88,6 +99,71 @@ class LiveMonitor:
                 logger.error(f"监控循环异常: {e}")
 
             await asyncio.sleep(settings.monitor_interval)
+
+    async def _refresh_loop(self):
+        """流地址主动刷新循环（独立于主检测，缩短刷新粒度）。
+
+        快手/B站/抖音的拉流地址多为带 txTime/txSecret 的短时效签名 URL，过期后
+        ffmpeg 会断流。该循环在录制期间以 stream_url_refresh_interval 的粒度重新
+        探测最新流地址，若发生变化则在旧地址过期前用新地址重启 ffmpeg，从而消除
+        「录几分钟就断」与重连空白。设为 0 时本循环不工作（仅靠断流重连兜底）。
+        """
+        # 首次启动延迟一个间隔，避免与开播检测争抢
+        while self._running:
+            interval = settings.stream_url_refresh_interval
+            if not interval or interval <= 0:
+                # 关闭主动刷新：长轮询等待，直到被 stop() 取消
+                await asyncio.sleep(60)
+                continue
+            await asyncio.sleep(interval)
+            if not self._running:
+                break
+            try:
+                await self._refresh_stream_urls()
+            except Exception as e:
+                logger.error(f"流地址刷新循环异常: {e}")
+
+    async def _refresh_stream_urls(self):
+        """对正在录制且进程存活的房间，重新探测流地址；若变化则用新地址续写同一场。"""
+        if not self._room_states:
+            return
+
+        room_ids = [rid for rid, st in self._room_states.items() if st.get("recording")]
+        if not room_ids:
+            return
+
+        async with async_session() as session:
+            result = await session.execute(
+                select(Room).where(Room.id.in_(room_ids), Room.enabled == True)
+            )
+            rooms = result.scalars().all()
+
+        for room in rooms:
+            # 仅当 ffmpeg 进程仍存活时才主动换地址（进程已死交给断流重连处理）
+            if not await recorder.is_recording(room.id):
+                continue
+
+            platform = self._get_platform(room.platform)
+            if not platform:
+                continue
+
+            try:
+                info = await platform.get_room_info(room.url)
+            except Exception as e:
+                logger.warning(f"刷新流地址时检测房间 {room.id} 失败: {e}")
+                continue
+
+            if not info.is_live or not info.stream_url:
+                # 主播已下播或这次没拿到地址：交给主循环最终化/重连，不在此处理
+                continue
+
+            prev = self._room_states.get(room.id, {}).get("stream_url", "")
+            if info.stream_url != prev:
+                logger.info(
+                    f"房间 {room.id} 流地址已刷新（短时效签名），用新地址续写同一场录制"
+                )
+                await self._reconnect_session(room, info)
+                self._room_states[room.id]["stream_url"] = info.stream_url
 
     async def _check_all_rooms(self):
         """检查所有启用的房间"""
@@ -218,11 +294,22 @@ class LiveMonitor:
                 )
                 await session.commit()
 
+            # 记录当前使用的流地址，供主动刷新循环判断是否需要换新地址续写
+            self._room_states[room.id] = {
+                "recording": True,
+                "stream_url": info.stream_url,
+            }
+
             logger.info(f"房间 {room.id} 开始录制: 最终文件={final_path} part={result['file_path']}")
             await self._notify(f"开始录制: {info.streamer_name} - {info.title}")
 
     async def _reconnect_session(self, room: Room, info: RoomInfo):
         """断流重连：续写同一场录制 —— 追加一个新 part，不新建 Recording。"""
+        async with self._reconnect_lock:
+            await self._reconnect_session_inner(room, info)
+
+    async def _reconnect_session_inner(self, room: Room, info: RoomInfo):
+        """断流重连真实执行体（已在外层加锁串行化）。"""
         async with async_session() as session:
             result = await session.execute(
                 select(Recording).where(
@@ -274,6 +361,10 @@ class LiveMonitor:
                     )
                 )
                 await session.commit()
+                # 同步跟踪的最新流地址，供主动刷新循环判断后续是否再次变化
+                st = self._room_states.setdefault(room.id, {"recording": True})
+                st["recording"] = True
+                st["stream_url"] = info.stream_url
                 logger.info(f"房间 {room.id} 断流重连续写同一场录制 (part {next_index}: {rec['file_path']})")
                 await self._notify(f"断流重连，继续录制: {info.streamer_name}")
             else:
@@ -283,6 +374,9 @@ class LiveMonitor:
         """停止一场录制：结束 ffmpeg，把所有 part 合并成最终单个文件。"""
         # 结束底层 ffmpeg 进程（已退出则安全返回）
         await recorder.stop_recording(room.id)
+
+        # 清除该房间的录制态跟踪，主动刷新循环不再对其刷新
+        self._room_states.pop(room.id, None)
 
         if recording is None:
             async with async_session() as session:

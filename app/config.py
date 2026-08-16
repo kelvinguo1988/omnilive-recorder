@@ -22,6 +22,12 @@ class AppConfig(BaseSettings):
     monitor_interval: int = 120
     check_timeout: int = 15
 
+    # 录制中流地址主动刷新间隔（秒）。快手/B站/抖音的拉流地址多为带 txTime/txSecret
+    # 的短时效签名 URL，过期后 ffmpeg 会断流。该循环在录制期间周期性重新探测最新
+    # 流地址，若发生变化则在旧地址过期前用新地址重启 ffmpeg（续写同一场录制），
+    # 避免「录几分钟就断」与重连空白。设为 0 关闭主动刷新（仅依赖断流重连）。
+    stream_url_refresh_interval: int = 90
+
     # 存储设置
     output_dir: str = "/app/recordings"
     max_disk_usage: int = 90
@@ -79,6 +85,7 @@ def _get_mapping():
         "filename_template": str,
         "monitor_interval": int,
         "check_timeout": int,
+        "stream_url_refresh_interval": int,
         "output_dir": str,
         "max_disk_usage": int,
         "host": str,
@@ -168,6 +175,7 @@ def save_config(config: AppConfig = None) -> bool:
     section["filename_template"] = str(config.filename_template)
     section["monitor_interval"] = str(config.monitor_interval)
     section["check_timeout"] = str(config.check_timeout)
+    section["stream_url_refresh_interval"] = str(config.stream_url_refresh_interval)
     section["output_dir"] = str(config.output_dir)
     section["max_disk_usage"] = str(config.max_disk_usage)
     section["host"] = str(config.host)
