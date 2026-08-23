@@ -2,10 +2,11 @@
 import asyncio
 import os
 import json
+import time
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
-from sqlalchemy import select, update
+from sqlalchemy import select, update, delete
 from app.database import async_session
 from app.models import Room, Recording, SystemLog
 from app.config import settings
@@ -27,8 +28,10 @@ class LiveMonitor:
         self._room_states: dict[int, dict] = {}
         # 串行化所有重连/换地址操作，避免刷新循环与断流重连同时对同一房间重启 ffmpeg
         self._reconnect_lock = asyncio.Lock()
+        # 上次清理旧系统日志的时间戳（P1-4，按天节流）
+        self._last_log_cleanup: float = 0.0
 
-    def _get_platform(self, platform_name: str):
+    async def _get_platform(self, platform_name: str):
         """获取平台适配器实例（cookie/proxy 变化则自动重建，避免缓存到过期空Cookie）"""
         cookie = ""
         if platform_name == "douyin":
@@ -45,6 +48,13 @@ class LiveMonitor:
                 and getattr(cached, "proxy", None) == proxy:
             return cached
 
+        # P0-2: 重建前先关闭旧实例，避免 httpx.AsyncClient 连接池泄漏
+        if cached is not None:
+            try:
+                await cached.close()
+            except Exception:
+                pass
+
         instance = PlatformFactory.get_platform(
             platform_name,
             proxy=proxy,
@@ -56,10 +66,27 @@ class LiveMonitor:
 
         return self._platform_instances.get(platform_name)
 
+    async def _reset_platform_cache(self):
+        """关闭并清空所有平台适配器实例（修改 cookie/proxy/URL 后调用）。
+
+        统一在此 close 旧实例的 httpx.AsyncClient，避免连接池泄漏（P0-2）。
+        替代直接操作 ``_platform_instances.clear()`` 的调用点。
+        """
+        for inst in list(self._platform_instances.values()):
+            try:
+                await inst.close()
+            except Exception:
+                pass
+        self._platform_instances.clear()
+
     async def start(self):
         """启动监控"""
         if self._running:
             return
+
+        # P0-3: 启动时恢复上次异常退出（如容器被强杀）遗留的录制记录，
+        # 这些记录停留在 recording 且已无 ffmpeg 进程，需标记为 failed 以免永远显示「录制中」
+        await self._recover_stale_recordings()
 
         self._running = True
         self._task = asyncio.create_task(self._monitor_loop())
@@ -83,9 +110,19 @@ class LiveMonitor:
                 pass
         self._refresh_task = None
 
-        # 停止所有录制
-        for platform_instance in self._platform_instances.values():
-            await platform_instance.close()
+        # P0-3: 优雅停止所有进行中的 ffmpeg，让 mp4 正常写 moov atom，避免文件损坏
+        for room_id in list(recorder.active_processes.keys()):
+            try:
+                await recorder.stop_recording(room_id)
+            except Exception as e:
+                logger.warning(f"停止房间 {room_id} 录制进程失败: {e}")
+
+        # 关闭所有平台适配器实例
+        for platform_instance in list(self._platform_instances.values()):
+            try:
+                await platform_instance.close()
+            except Exception:
+                pass
         self._platform_instances.clear()
 
         logger.info("直播监控调度器已停止")
@@ -97,6 +134,15 @@ class LiveMonitor:
                 await self._check_all_rooms()
             except Exception as e:
                 logger.error(f"监控循环异常: {e}")
+
+            # P1-4: 每天清理一次 30 天前的系统日志，避免 system_logs 表无限增长
+            try:
+                now_ts = time.time()
+                if now_ts - self._last_log_cleanup > 86400:
+                    self._last_log_cleanup = now_ts
+                    await self._cleanup_old_logs()
+            except Exception as e:
+                logger.warning(f"清理旧系统日志失败: {e}")
 
             await asyncio.sleep(settings.monitor_interval)
 
@@ -123,6 +169,47 @@ class LiveMonitor:
             except Exception as e:
                 logger.error(f"流地址刷新循环异常: {e}")
 
+    async def _recover_stale_recordings(self):
+        """启动时恢复上次异常退出遗留的录制记录（P0-3）。
+
+        服务被强杀（如容器 SIGKILL）重启后，DB 中可能有 status=recording 但已无
+        ffmpeg 进程的记录，且 mp4 文件因 moov atom 未写可能损坏。这里把它们标记为
+        failed，并复位房间的 is_recording，避免前端永远显示「录制中」。
+        """
+        try:
+            async with async_session() as session:
+                res = await session.execute(
+                    select(Recording).where(Recording.status == "recording")
+                )
+                recs = res.scalars().all()
+                for rec in recs:
+                    fp = rec.file_path or ""
+                    size = os.path.getsize(fp) if fp and os.path.exists(fp) else 0
+                    await session.execute(
+                        update(Recording).where(Recording.id == rec.id).values(
+                            status="failed",
+                            file_size=size,
+                            ended_at=datetime.now(),
+                            error_message="服务重启恢复：检测到进行中但无录制进程，标记为失败",
+                        )
+                    )
+                    await session.execute(
+                        update(Room).where(Room.id == rec.room_id).values(is_recording=False)
+                    )
+                if recs:
+                    await session.commit()
+                    logger.warning(f"恢复 {len(recs)} 条遗留录制记录为 failed")
+        except Exception as e:
+            logger.error(f"恢复遗留录制记录失败: {e}")
+
+    async def _cleanup_old_logs(self):
+        """清理 30 天前的系统日志（P1-4），避免 system_logs 表无限增长。"""
+        cutoff = datetime.now() - timedelta(days=30)
+        async with async_session() as session:
+            await session.execute(delete(SystemLog).where(SystemLog.created_at < cutoff))
+            await session.commit()
+        logger.debug("已清理 30 天前的系统日志")
+
     async def _refresh_stream_urls(self):
         """对正在录制且进程存活的房间，重新探测流地址；若变化则用新地址续写同一场。"""
         if not self._room_states:
@@ -143,7 +230,7 @@ class LiveMonitor:
             if not await recorder.is_recording(room.id):
                 continue
 
-            platform = self._get_platform(room.platform)
+            platform = await self._get_platform(room.platform)
             if not platform:
                 continue
 
@@ -189,7 +276,7 @@ class LiveMonitor:
 
     async def _check_room(self, room: Room):
         """检查单个房间状态"""
-        platform = self._get_platform(room.platform)
+        platform = await self._get_platform(room.platform)
         if not platform:
             logger.warning(f"不支持的平台: {room.platform}")
             return
@@ -220,8 +307,14 @@ class LiveMonitor:
                 )
                 await session.commit()
 
+            # P2-6: 重新读取最新 is_recording，避免循环开始时的快照值在并发刷新/重连时误判
+            cur = (await session.execute(
+                select(Room.is_recording).where(Room.id == room.id)
+            )).first()
+            room_is_recording = bool(cur[0]) if cur else False
+
             # 状态变化处理
-            if info.is_live and not room.is_recording:
+            if info.is_live and not room_is_recording:
                 # 开播且未在录制 - 开启一场新录制（首个 part）
                 if info.stream_url:
                     await self._start_recording(room, info)
@@ -229,13 +322,13 @@ class LiveMonitor:
                 else:
                     logger.warning(f"房间 {room.id} 开播但未获取到流地址")
 
-            elif not info.is_live and room.is_recording:
+            elif not info.is_live and room_is_recording:
                 # 下播 - 结束当前场次（合并所有 part 为单个文件）
                 await self._finalize_session(room)
                 room.is_recording = False
 
             # 断流重连检查：录制中但 ffmpeg 进程已退出（直播仍在进行）
-            if room.is_recording:
+            if room_is_recording:
                 is_still_recording = await recorder.is_recording(room.id)
                 if not is_still_recording:
                     if info.is_live and info.stream_url:
@@ -285,7 +378,7 @@ class LiveMonitor:
                     file_name=os.path.basename(final_path),
                     format=fmt,
                     status="recording",
-                    started_at=datetime.utcnow(),
+                    started_at=datetime.now(),
                     part_paths=json.dumps([self._rel(result["file_path"])]),
                 )
                 session.add(recording)
@@ -310,6 +403,13 @@ class LiveMonitor:
 
     async def _reconnect_session_inner(self, room: Room, info: RoomInfo):
         """断流重连真实执行体（已在外层加锁串行化）。"""
+        # P1-1: 幂等检查。若本次流地址与已跟踪的一致且进程仍存活，
+        # 说明刚被刷新循环/重连的另一路处理过，跳过重复 stop+start，避免视频出现空白段。
+        st = self._room_states.get(room.id, {})
+        if st.get("stream_url") == info.stream_url and await recorder.is_recording(room.id):
+            logger.debug(f"房间 {room.id} 流地址未变化且仍在录制，跳过重复重连")
+            return
+
         async with async_session() as session:
             result = await session.execute(
                 select(Recording).where(
@@ -410,10 +510,12 @@ class LiveMonitor:
                 except OSError as e:
                     logger.error(f"移动单段文件失败: {e}")
         else:
-            # 多 part：合并为单个最终文件后删除碎片
+            # 多 part：合并为单个最终文件后删除碎片（P0-1：合并目标用原计划路径，
+            # 保持「平台/主播/日期」目录结构与命名，避免落到 merged/ 导致无法追溯）
             merged = file_manager.merge_recordings(
                 [os.path.relpath(f, settings.output_dir) for f in files],
                 output_format=recording.format,
+                output_path=final_path,
             )
             if merged.get("success"):
                 final_path = merged["output_path"]
@@ -427,7 +529,7 @@ class LiveMonitor:
                 logger.error(f"房间 {room.id} 合并碎片失败: {merged.get('error')}")
 
         size = os.path.getsize(final_path) if os.path.exists(final_path) else 0
-        now = datetime.utcnow()
+        now = datetime.now()
         duration = (now - recording.started_at).total_seconds() if recording.started_at else 0
 
         async with async_session() as session:

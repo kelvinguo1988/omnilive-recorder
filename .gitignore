@@ -24,6 +24,3 @@ config/config.local.ini
 .idea/
 .vscode/
 *.log
-
-# Docker
-.dockerignore

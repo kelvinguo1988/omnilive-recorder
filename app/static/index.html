@@ -268,15 +268,6 @@
                             </select>
                         </div>
                         <div class="form-group">
-                            <label>默认画质</label>
-                            <select id="set_video_quality" class="select">
-                                <option value="origin">原画</option>
-                                <option value="blue_ray">蓝光</option>
-                                <option value="ultra">超清</option>
-                                <option value="high">高清</option>
-                            </select>
-                        </div>
-                        <div class="form-group">
                             <label>分段时长（秒）</label>
                             <input id="set_segment_time" class="input" type="number" min="1" placeholder="1800" oninput="updateFilenamePreview()" />
                             <div class="form-hint">单文件录制时长上限，超时自动分段。TS / MP4 支持分段；FLV 始终为单文件</div>
@@ -289,14 +280,6 @@
                         <div class="form-group">
                             <label>检测超时（秒）</label>
                             <input id="set_check_timeout" class="input" type="number" min="1" placeholder="15" />
-                        </div>
-                        <div class="form-group">
-                            <label>最大重试次数</label>
-                            <input id="set_max_retries" class="input" type="number" min="0" placeholder="3" />
-                        </div>
-                        <div class="form-group">
-                            <label>重试间隔（秒）</label>
-                            <input id="set_retry_delay" class="input" type="number" min="0" placeholder="10" />
                         </div>
                         <div class="form-group">
                             <label>磁盘用量上限（%）</label>

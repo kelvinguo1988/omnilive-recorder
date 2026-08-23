@@ -119,7 +119,7 @@ async def export_rooms(db: AsyncSession = Depends(get_db)):
     data = {
         "version": 1,
         "type": "omnilive-rooms",
-        "exported_at": datetime.utcnow().isoformat(),
+        "exported_at": datetime.now().isoformat(),
         "count": len(rooms),
         "rooms": [
             {
@@ -224,9 +224,10 @@ async def update_room(room_id: int, room: RoomUpdate, db: AsyncSession = Depends
         else:
             update_data["room_id"] = rid.extract_room_id(new_url)
         # 清空已缓存的平台适配器实例，下次检查按新 URL/平台重建
+        # P0-2: 使用 _reset_platform_cache 先 close 旧实例再 clear，避免连接泄漏
         try:
             from app.services.monitor import monitor
-            monitor._platform_instances.clear()
+            await monitor._reset_platform_cache()
         except Exception:
             pass
 
@@ -282,7 +283,7 @@ async def manual_start_recording(room_id: int, db: AsyncSession = Depends(get_db
         raise HTTPException(status_code=400, detail="未在直播中")
 
     # 获取流地址
-    platform = monitor._get_platform(room.platform)
+    platform = await monitor._get_platform(room.platform)
     if not platform:
         raise HTTPException(status_code=500, detail="平台适配器不可用")
 

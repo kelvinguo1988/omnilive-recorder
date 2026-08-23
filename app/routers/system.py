@@ -22,10 +22,7 @@ router = APIRouter(prefix="/api/system", tags=["system"])
 class SettingsUpdate(BaseModel):
     """系统设置更新请求（所有字段均可选，仅更新传入项）"""
     record_format: Optional[str] = None
-    video_quality: Optional[str] = None
     segment_time: Optional[int] = None
-    max_retries: Optional[int] = None
-    retry_delay: Optional[int] = None
     monitor_interval: Optional[int] = None
     check_timeout: Optional[int] = None
     output_dir: Optional[str] = None
@@ -42,7 +39,7 @@ class SettingsUpdate(BaseModel):
 
 _VALID_FORMATS = {"ts", "flv", "mp4"}
 _INT_FIELDS = ("segment_time", "monitor_interval", "check_timeout",
-               "max_retries", "retry_delay", "max_disk_usage")
+               "max_disk_usage")
 _PROXY_RELATED = ("proxy_addr", "enable_proxy", "douyin_cookie", "bilibili_cookie", "kuaishou_cookie")
 
 
@@ -88,26 +85,23 @@ async def system_info(db: AsyncSession = Depends(get_db)):
             "completed": completed_recordings,
         },
         "active_recordings": len(recorder.active_processes),
-        "settings": {
-            "record_format": settings.record_format,
-            "video_quality": settings.video_quality,
-            "segment_time": settings.segment_time,
-            "max_retries": settings.max_retries,
-            "retry_delay": settings.retry_delay,
-            "monitor_interval": settings.monitor_interval,
-            "check_timeout": settings.check_timeout,
-            "output_dir": settings.output_dir,
-            "max_disk_usage": settings.max_disk_usage,
-            "filename_template": settings.filename_template,
-            "enable_notification": settings.enable_notification,
-            "webhook_url": settings.webhook_url,
-            "enable_proxy": settings.enable_proxy,
-            "proxy_addr": settings.proxy_addr,
-            "douyin_cookie": settings.douyin_cookie,
-            "bilibili_cookie": settings.bilibili_cookie,
-            "kuaishou_cookie": settings.kuaishou_cookie,
-        },
-    }
+            "settings": {
+                "record_format": settings.record_format,
+                "segment_time": settings.segment_time,
+                "monitor_interval": settings.monitor_interval,
+                "check_timeout": settings.check_timeout,
+                "output_dir": settings.output_dir,
+                "max_disk_usage": settings.max_disk_usage,
+                "filename_template": settings.filename_template,
+                "enable_notification": settings.enable_notification,
+                "webhook_url": settings.webhook_url,
+                "enable_proxy": settings.enable_proxy,
+                "proxy_addr": settings.proxy_addr,
+                "douyin_cookie": settings.douyin_cookie,
+                "bilibili_cookie": settings.bilibili_cookie,
+                "kuaishou_cookie": settings.kuaishou_cookie,
+            },
+        }
 
 
 @router.get("/logs")
@@ -233,9 +227,10 @@ async def _apply_settings(updates: dict):
         os.makedirs(settings.output_dir, exist_ok=True)
 
     # 代理/cookie 变化：清空已缓存的平台适配器实例，下次检查时按新配置重建
+    # P0-2: 使用 _reset_platform_cache 先 close 旧实例再 clear，避免连接泄漏
     if proxy_related_changed:
         from app.services.monitor import monitor
-        monitor._platform_instances.clear()
+        await monitor._reset_platform_cache()
 
     # 持久化到配置文件，重启后依然生效
     try:
@@ -246,26 +241,23 @@ async def _apply_settings(updates: dict):
     return {
         "success": True,
         "message": "设置已更新",
-        "settings": {
-            "record_format": settings.record_format,
-            "video_quality": settings.video_quality,
-            "segment_time": settings.segment_time,
-            "max_retries": settings.max_retries,
-            "retry_delay": settings.retry_delay,
-            "monitor_interval": settings.monitor_interval,
-            "check_timeout": settings.check_timeout,
-            "output_dir": settings.output_dir,
-            "max_disk_usage": settings.max_disk_usage,
-            "filename_template": settings.filename_template,
-            "enable_notification": settings.enable_notification,
-            "webhook_url": settings.webhook_url,
-            "enable_proxy": settings.enable_proxy,
-            "proxy_addr": settings.proxy_addr,
-            "douyin_cookie": settings.douyin_cookie,
-            "bilibili_cookie": settings.bilibili_cookie,
-            "kuaishou_cookie": settings.kuaishou_cookie,
-        },
-    }
+            "settings": {
+                "record_format": settings.record_format,
+                "segment_time": settings.segment_time,
+                "monitor_interval": settings.monitor_interval,
+                "check_timeout": settings.check_timeout,
+                "output_dir": settings.output_dir,
+                "max_disk_usage": settings.max_disk_usage,
+                "filename_template": settings.filename_template,
+                "enable_notification": settings.enable_notification,
+                "webhook_url": settings.webhook_url,
+                "enable_proxy": settings.enable_proxy,
+                "proxy_addr": settings.proxy_addr,
+                "douyin_cookie": settings.douyin_cookie,
+                "bilibili_cookie": settings.bilibili_cookie,
+                "kuaishou_cookie": settings.kuaishou_cookie,
+            },
+        }
 
 
 @router.get("/settings/export")
@@ -275,13 +267,10 @@ async def export_settings():
     data = {
         "version": 1,
         "type": "omnilive-settings",
-        "exported_at": datetime.utcnow().isoformat(),
+        "exported_at": datetime.now().isoformat(),
         "settings": {
             "record_format": s.record_format,
-            "video_quality": s.video_quality,
             "segment_time": s.segment_time,
-            "max_retries": s.max_retries,
-            "retry_delay": s.retry_delay,
             "monitor_interval": s.monitor_interval,
             "check_timeout": s.check_timeout,
             "output_dir": s.output_dir,

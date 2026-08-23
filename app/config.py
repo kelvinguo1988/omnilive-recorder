@@ -2,7 +2,7 @@
 import configparser
 import os
 from pathlib import Path
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
 
 
@@ -10,10 +10,7 @@ class AppConfig(BaseSettings):
     """应用配置"""
     # 录制设置
     record_format: str = "ts"
-    video_quality: str = "origin"
     segment_time: int = 1800
-    max_retries: int = 3
-    retry_delay: int = 10
 
     # 输出文件名模板（占位符见 recorder._build_base_name）
     filename_template: str = "{streamer}_{time}"
@@ -54,8 +51,8 @@ class AppConfig(BaseSettings):
     # 数据库
     database_url: str = "sqlite+aiosqlite:////app/data/live_recorder.db"
 
-    class Config:
-        env_prefix = "LIVE_RECORDER_"
+    # P2-4: pydantic-settings v2 推荐写法（替代已弃用的 class Config）
+    model_config = SettingsConfigDict(env_prefix="LIVE_RECORDER_")
 
 
 def get_data_dir(database_url: str = None) -> str:
@@ -78,10 +75,7 @@ def _get_mapping():
     """配置字段 -> 类型转换函数"""
     return {
         "record_format": str,
-        "video_quality": str,
         "segment_time": int,
-        "max_retries": int,
-        "retry_delay": int,
         "filename_template": str,
         "monitor_interval": int,
         "check_timeout": int,
@@ -168,10 +162,7 @@ def save_config(config: AppConfig = None) -> bool:
         return "true" if v else "false"
 
     section["record_format"] = str(config.record_format)
-    section["video_quality"] = str(config.video_quality)
     section["segment_time"] = str(config.segment_time)
-    section["max_retries"] = str(config.max_retries)
-    section["retry_delay"] = str(config.retry_delay)
     section["filename_template"] = str(config.filename_template)
     section["monitor_interval"] = str(config.monitor_interval)
     section["check_timeout"] = str(config.check_timeout)

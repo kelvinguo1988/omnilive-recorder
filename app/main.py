@@ -4,8 +4,9 @@ import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from app.database import init_db
 from app.config import settings
 from app.routers import rooms, recordings, system, files
@@ -18,6 +19,26 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+
+# P1-3: 可选的 API 鉴权。设置环境变量 LIVE_RECORDER_API_TOKEN 后，所有 /api/* 请求
+# 必须携带 `Authorization: Bearer <token>`；未设置则该中间件不生效（向后兼容）。
+API_TOKEN = os.environ.get("LIVE_RECORDER_API_TOKEN", "").strip()
+
+
+class AuthMiddleware(BaseHTTPMiddleware):
+    """轻量 Bearer Token 鉴权（仅当配置了 API_TOKEN 时启用）。"""
+
+    async def dispatch(self, request, call_next):
+        path = request.url.path
+        # 健康检查免鉴权
+        if path == "/api/health":
+            return await call_next(request)
+        # 仅对 /api/* 鉴权；静态首页与 / 放行
+        if API_TOKEN and path.startswith("/api/"):
+            auth = request.headers.get("Authorization", "")
+            if auth != f"Bearer {API_TOKEN}":
+                return JSONResponse(status_code=401, content={"detail": "未授权：缺少或错误的 API Token"})
+        return await call_next(request)
 
 
 @asynccontextmanager
@@ -55,13 +76,25 @@ app = FastAPI(
 )
 
 # CORS
+# P1-3: 关闭 allow_credentials（与 allow_origins="*" 互斥，原组合违反浏览器规范）。
+# 若需带凭据跨域，请把 allow_origins 改为具体的前端域名白名单。
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# P1-3: 可选 API 鉴权中间件（仅当配置了 LIVE_RECORDER_API_TOKEN 时生效）
+if API_TOKEN:
+    app.add_middleware(AuthMiddleware)
+    logger.info("已启用 API Token 鉴权（LIVE_RECORDER_API_TOKEN）")
+else:
+    logger.warning(
+        "未设置 LIVE_RECORDER_API_TOKEN，API 接口无鉴权。"
+        "请仅在内网部署，或在反向代理前加鉴权，或设置该环境变量启用 Bearer Token 鉴权。"
+    )
 
 # 注册路由
 app.include_router(rooms.router)

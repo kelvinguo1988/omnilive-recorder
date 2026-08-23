@@ -2,7 +2,7 @@
 import asyncio
 import os
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from app.services.file_manager import file_manager
 
@@ -44,7 +44,11 @@ async def download_file(file_path: str):
 
 @router.get("/play/{file_path:path}")
 async def play_file(file_path: str):
-    """在线播放文件"""
+    """在线播放文件
+
+    P1-2: 改用 FileResponse，由 Starlette 自动处理 Range 请求，
+    浏览器 <video> 拖动进度条/跳播即可正常工作（原 StreamingResponse 伪 Range 支持会导致拖动失效）。
+    """
     full_path = file_manager.get_file_path(file_path)
 
     ext = os.path.splitext(full_path)[1].lower()
@@ -56,21 +60,10 @@ async def play_file(file_path: str):
     }
     media_type = media_types.get(ext, "application/octet-stream")
 
-    file_size = os.path.getsize(full_path)
-
-    def iter_file():
-        with open(full_path, "rb") as f:
-            while chunk := f.read(1024 * 1024):
-                yield chunk
-
-    return StreamingResponse(
-        iter_file(),
+    return FileResponse(
+        full_path,
         media_type=media_type,
-        headers={
-            "Content-Length": str(file_size),
-            "Accept-Ranges": "bytes",
-            "Content-Disposition": f"inline; filename=\"{os.path.basename(full_path)}\"",
-        },
+        filename=os.path.basename(full_path),
     )
 
 

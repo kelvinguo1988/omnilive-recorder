@@ -417,12 +417,9 @@ async function loadSettings() {
         const s = info.settings || {};
 
         setField('set_record_format', s.record_format);
-        setField('set_video_quality', s.video_quality);
         setField('set_segment_time', s.segment_time);
         setField('set_monitor_interval', s.monitor_interval);
         setField('set_check_timeout', s.check_timeout);
-        setField('set_max_retries', s.max_retries);
-        setField('set_retry_delay', s.retry_delay);
         setField('set_max_disk_usage', s.max_disk_usage);
         setField('set_output_dir', s.output_dir);
         setField('set_filename_template', s.filename_template);
@@ -482,12 +479,9 @@ function getCheck(id) {
 async function saveSettings(e) {
     const payload = {
         record_format: getField('set_record_format'),
-        video_quality: getField('set_video_quality'),
         segment_time: parseInt(getField('set_segment_time'), 10) || 0,
         monitor_interval: parseInt(getField('set_monitor_interval'), 10) || 0,
         check_timeout: parseInt(getField('set_check_timeout'), 10) || 0,
-        max_retries: parseInt(getField('set_max_retries'), 10) || 0,
-        retry_delay: parseInt(getField('set_retry_delay'), 10) || 0,
         max_disk_usage: parseInt(getField('set_max_disk_usage'), 10) || 0,
         output_dir: getField('set_output_dir'),
         filename_template: getField('set_filename_template'),

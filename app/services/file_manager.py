@@ -1,5 +1,6 @@
 """文件管理服务"""
 import os
+import time
 import shutil
 import subprocess
 import logging
@@ -15,6 +16,10 @@ logger = logging.getLogger(__name__)
 class FileManager:
     """录制文件管理"""
 
+    # P1-5: 文件列表/磁盘统计全量 os.walk 在 NAS 大目录下很慢，加一个短 TTL 内存缓存
+    _CACHE_TTL = 10  # 秒
+    _cache = {"file_list": (0.0, None), "disk_usage": (0.0, None)}
+
     @property
     def output_dir(self):
         """实时读取全局配置的输出目录
@@ -24,11 +29,36 @@ class FileManager:
         """
         return settings.output_dir
 
+    def _cache_get(self, key: str):
+        ts, val = self._cache.get(key, (0.0, None))
+        if val is not None and (time.time() - ts) < self._CACHE_TTL:
+            return val
+        return None
+
+    def _cache_set(self, key: str, val):
+        self._cache[key] = (time.time(), val)
+
+    def _invalidate(self, key: str):
+        self._cache[key] = (0.0, None)
+
     def get_file_list(self, platform: str = None, streamer: str = None) -> list:
-        """获取文件列表"""
+        """获取文件列表（带 TTL 缓存，P1-5）"""
+        full = self._get_all_files_cached()
+        if platform is None and streamer is None:
+            return full
+        return [
+            f for f in full
+            if (platform is None or f["platform"] == platform)
+            and (streamer is None or f["streamer"] == streamer)
+        ]
+
+    def _get_all_files_cached(self) -> list:
+        cached = self._cache_get("file_list")
+        if cached is not None:
+            return cached
+
         result = []
         base_path = Path(self.output_dir)
-
         if not base_path.exists():
             return result
 
@@ -44,11 +74,6 @@ class FileManager:
                 file_platform = parts[0] if len(parts) > 0 else ""
                 file_streamer = parts[1] if len(parts) > 1 else ""
 
-                if platform and file_platform != platform:
-                    continue
-                if streamer and file_streamer != streamer:
-                    continue
-
                 stat = os.stat(file_path)
                 result.append({
                     "name": f,
@@ -63,6 +88,7 @@ class FileManager:
                 })
 
         result.sort(key=lambda x: x["modified_time"], reverse=True)
+        self._cache_set("file_list", result)
         return result
 
     def get_file_path(self, rel_path: str) -> str:
@@ -83,6 +109,8 @@ class FileManager:
         full_path = self.get_file_path(rel_path)
         try:
             os.remove(full_path)
+            # P1-5: 删除后让文件列表缓存失效，避免前端看到残留条目
+            self._invalidate("file_list")
             logger.info(f"已删除文件: {rel_path}")
 
             # 清理空目录
@@ -103,7 +131,11 @@ class FileManager:
             return False
 
     def get_disk_usage(self) -> dict:
-        """获取磁盘使用情况"""
+        """获取磁盘使用情况（带 TTL 缓存，P1-5）"""
+        cached = self._cache_get("disk_usage")
+        if cached is not None:
+            return cached
+
         try:
             usage = shutil.disk_usage(self.output_dir)
             total_gb = round(usage.total / 1024 / 1024 / 1024, 2)
@@ -117,13 +149,15 @@ class FileManager:
                 for f in files:
                     recording_size += os.path.getsize(os.path.join(root, f))
 
-            return {
+            result = {
                 "total_gb": total_gb,
                 "used_gb": used_gb,
                 "free_gb": free_gb,
                 "percent": percent,
                 "recording_size_gb": round(recording_size / 1024 / 1024 / 1024, 2),
             }
+            self._cache_set("disk_usage", result)
+            return result
         except Exception as e:
             logger.error(f"获取磁盘使用情况失败: {e}")
             return {}
@@ -165,11 +199,15 @@ class FileManager:
         return result
 
 
-    def merge_recordings(self, file_paths: list, output_format: str = "mp4") -> dict:
+    def merge_recordings(self, file_paths: list, output_format: str = "mp4",
+                          output_path: str = None) -> dict:
         """合并多个录制文件为一个 (ffmpeg concat demuxer, 流拷贝不重编码)
 
         用于把断流重连产生的多个碎片 .ts 拼成一个完整文件。
         返回 {success, output_path, output_name, output_rel, file_size, file_size_mb, input_count}
+
+        :param output_path: 可选，合并结果的绝对/相对输出路径。传入时合并到该路径
+            （保持「平台/主播/日期」目录结构与命名，P0-1）；不传则落到 ``merged/`` 目录。
         """
         if not file_paths or len(file_paths) < 2:
             return {"success": False, "error": "至少需要 2 个文件才能合并"}
@@ -187,14 +225,29 @@ class FileManager:
                 return {"success": False, "error": f"文件不存在: {rel}"}
             abs_paths.append(full)
 
-        merged_dir = os.path.join(base_path, "merged")
-        os.makedirs(merged_dir, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_name = f"merged_{ts}.{fmt}"
-        out_path = os.path.join(merged_dir, out_name)
+        if output_path:
+            # 合并到指定的原计划路径（保持目录结构与命名）
+            out_path = output_path if os.path.isabs(output_path) \
+                else os.path.join(base_path, output_path)
+            out_path = os.path.abspath(out_path)
+            # 安全校验：合并结果也必须位于输出目录内
+            if not out_path.startswith(base_path):
+                return {"success": False, "error": f"非法输出路径: {output_path}"}
+            out_dir = os.path.dirname(out_path)
+            os.makedirs(out_dir, exist_ok=True)
+            out_name = os.path.basename(out_path)
+            if "." not in out_name:
+                out_name = f"{out_name}.{fmt}"
+                out_path = os.path.join(out_dir, out_name)
+        else:
+            merged_dir = os.path.join(base_path, "merged")
+            os.makedirs(merged_dir, exist_ok=True)
+            out_name = f"merged_{ts}.{fmt}"
+            out_path = os.path.join(merged_dir, out_name)
 
-        # 写 ffmpeg concat 列表文件
-        list_path = os.path.join(merged_dir, f"_list_{ts}.txt")
+        # 写 ffmpeg concat 列表文件（放在输出文件同目录，避免跨目录权限问题）
+        list_path = os.path.join(os.path.dirname(out_path), f"_list_{ts}.txt")
         with open(list_path, "w", encoding="utf-8") as f:
             for p in abs_paths:
                 f.write(f"file '{p}'\n")

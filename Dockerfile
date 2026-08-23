@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.11.9-slim-bookworm
 
 # 镜像源参数化：默认官方源(适合 GitHub 境外 runner)，本地可传阿里云源加速
 ARG APT_MIRROR=deb.debian.org
@@ -20,8 +20,14 @@ RUN sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sou
 WORKDIR /app
 
 # 复制依赖文件并安装（本地构建传 PIP_INDEX=https://mirrors.aliyun.com/pypi/simple/）
-COPY requirements.txt .
-RUN pip install --no-cache-dir -i ${PIP_INDEX} -r requirements.txt
+# P2-7: 优先使用 pip-compile 生成的 requirements.lock（锁定传递依赖，提升复现性），
+# 不存在时回退到 requirements.txt。
+COPY requirements.txt requirements.lock* ./
+RUN if [ -f requirements.lock ]; then \
+      pip install --no-cache-dir -i ${PIP_INDEX} -r requirements.lock; \
+    else \
+      pip install --no-cache-dir -i ${PIP_INDEX} -r requirements.txt; \
+    fi
 
 # 复制应用代码
 COPY app/ ./app/

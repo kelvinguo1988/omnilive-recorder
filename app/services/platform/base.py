@@ -31,10 +31,12 @@ class BasePlatform(ABC):
         # Cookie 可能从 UI 粘贴带入首尾空白/换行，httpx 拒绝含换行符的 header 值，统一在此清理
         self.cookie = cookie.strip() if cookie else ""
         self.timeout = timeout
+        # 优化点：显式设置连接池上限，避免长期运行下连接数无限增长（观察项 #5）
         self.client = httpx.AsyncClient(
             timeout=httpx.Timeout(timeout, connect=10),
             follow_redirects=True,
             proxy=proxy if proxy else None,
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
         )
 
     async def close(self):

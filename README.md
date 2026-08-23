@@ -261,6 +261,18 @@ omnilive-recorder/
 
 ---
 
+## 🔒 安全与部署建议
+
+- **务必部署在内网**，或放在已做鉴权的反向代理（如 Nginx + Basic Auth / OAuth）之后。
+- 所有 API（`/api/*`）默认**无鉴权**。如需对外暴露，请设置环境变量
+  `LIVE_RECORDER_API_TOKEN=<你的强随机串>`，启用后所有 `/api/*` 请求需携带
+  `Authorization: Bearer <token>`（健康检查 `/api/health` 与静态首页免鉴权）。
+- 直播平台 Cookie 属于敏感凭据，请勿提交到公开仓库；本项目已通过 `.gitignore`
+  忽略本地配置文件。
+- 依赖已通过 `requirements.lock`（由 `pip-compile` 生成）锁定传递依赖，CI 构建优先使用该文件以保证复现性。
+
+---
+
 ## ⚠️ 免责声明
 
 本项目仅供个人学习与技术研究使用。请遵守各直播平台的服务条款与当地法律法规，

@@ -1,6 +1,5 @@
 """抖音直播适配器"""
 import re
-import json
 import hashlib
 import time
 import logging
@@ -44,73 +43,12 @@ class DouyinPlatform(BasePlatform):
         info.room_id = room_id
 
         try:
-            live_url = f"https://live.douyin.com/{room_id}"
-
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Referer": "https://live.douyin.com/",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            }
-            if self.cookie:
-                headers["Cookie"] = self.cookie
-
-            response = await self.client.get(live_url, headers=headers)
-            text = response.text
-
-            # 从页面中提取渲染数据
-            render_data_match = re.search(
-                r'<script id="RENDER_DATA"[^>]*>(.*?)</script>', text, re.DOTALL
-            )
-
-            if render_data_match:
-                from urllib.parse import unquote
-                render_data = unquote(render_data_match.group(1))
-                data = json.loads(render_data)
-
-                # 解析直播数据 - 路径可能随版本变化
-                live_data = None
-                for key, value in data.items():
-                    if isinstance(value, dict):
-                        if "room" in value or "liveRoom" in value:
-                            live_data = value
-                            break
-                    if isinstance(value, str):
-                        try:
-                            inner = json.loads(value)
-                            if isinstance(inner, dict) and ("room" in inner or "liveRoom" in inner):
-                                live_data = inner
-                                break
-                        except json.JSONDecodeError:
-                            pass
-
-                if live_data:
-                    room = live_data.get("room", live_data.get("liveRoom", {}))
-                    info.title = room.get("title", "")
-                    info.is_live = room.get("status", 0) == 2
-
-                    owner = room.get("owner", {})
-                    info.streamer_name = owner.get("nickname", "")
-
-                    stream_url = room.get("stream_url", {})
-                    info.stream_url = self._extract_flv_stream(stream_url)
-
-                    if not info.stream_url:
-                        info.stream_url = self._extract_hls_stream(stream_url)
-
-                    cover = room.get("cover", {})
-                    if isinstance(cover, dict):
-                        info.cover_url = cover.get("url_list", [""])[0] if cover.get("url_list") else ""
-
-                    if info.is_live and not info.stream_url:
-                        info.stream_url = await self._get_stream_from_api(room_id, info)
-
-            else:
-                # 抖音已弃用 RENDER_DATA，游客态页面也不再服务端渲染房间信息；
-                # 统一走 webcast API。游客态接口会隐藏 owner（主播名），登录态 Cookie 才返回。
-                info.stream_url = await self._get_stream_from_api(room_id, info)
-                if info.stream_url and not info.is_live:
-                    # API 未明确返回 status 时的兜底：能拿到流地址即视为直播中
-                    info.is_live = True
+            # P2-5: 抖音已弃用 RENDER_DATA 服务端渲染（8/16 修复确认），游客态页面不再返回
+            # 房间信息，统一走 webcast API 获取流地址与标题/主播名，避免走已失效的解析分支。
+            info.stream_url = await self._get_stream_from_api(room_id, info)
+            if info.stream_url and not info.is_live:
+                # API 未明确返回 status 时的兜底：能拿到流地址即视为直播中
+                info.is_live = True
 
             logger.info(
                 f"抖音房间 {room_id}: 主播={info.streamer_name or '-'}, "
