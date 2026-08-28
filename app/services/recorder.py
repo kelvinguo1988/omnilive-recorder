@@ -297,21 +297,6 @@ class FFmpegRecorder:
             process = self.active_processes.get(room_db_id)
             return process.pid if process and process.returncode is None else None
 
-    async def get_file_size(self, file_path: str) -> int:
-        """获取文件大小"""
-        try:
-            if os.path.exists(file_path):
-                return os.path.getsize(file_path)
-            # 检查分段文件
-            pattern = file_path.replace(".ts", "_*.ts")
-            import glob
-            total = 0
-            for f in glob.glob(pattern):
-                total += os.path.getsize(f)
-            return total
-        except Exception:
-            return 0
-
     async def cleanup_finished(self):
         """清理已完成的进程"""
         async with self._lock:

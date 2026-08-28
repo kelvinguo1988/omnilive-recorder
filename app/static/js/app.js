@@ -38,6 +38,17 @@ function showToast(message, type = 'info') {
     setTimeout(() => toast.remove(), 3000);
 }
 
+// HTML 转义：主播名/标题等来自平台 API（主播方可控），文件名/日志含特殊字符，
+// 拼进 innerHTML 或 title 属性前必须转义，防止注入
+function escapeHtml(s) {
+    return String(s ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 // 格式化时间
 function formatTime(iso) {
     if (!iso) return '-';
@@ -91,8 +102,8 @@ async function refreshDashboard() {
             container.innerHTML = activeRooms.map(r => `
                 <div class="recording-item">
                     <div class="info">
-                        <div class="name">${r.streamer_name || r.title || '未知'}</div>
-                        <div class="detail">${PLATFORM_NAMES[r.platform] || r.platform} · ${formatTime(r.last_live_time)}</div>
+                        <div class="name">${escapeHtml(r.streamer_name || r.title || '未知')}</div>
+                        <div class="detail">${escapeHtml(PLATFORM_NAMES[r.platform] || r.platform)} · ${formatTime(r.last_live_time)}</div>
                     </div>
                     <div class="recording-pulse" title="录制中"></div>
                 </div>
@@ -116,9 +127,9 @@ async function loadRooms() {
 
         tbody.innerHTML = rooms.map(r => `
             <tr>
-                <td><span class="platform-tag ${PLATFORM_TAGS[r.platform] || ''}">${PLATFORM_NAMES[r.platform] || r.platform}</span></td>
-                <td>${r.streamer_name || '-'}</td>
-                <td title="${r.title || ''}">${r.title ? (r.title.length > 25 ? r.title.substring(0, 25) + '...' : r.title) : '-'}</td>
+                <td><span class="platform-tag ${PLATFORM_TAGS[r.platform] || ''}">${escapeHtml(PLATFORM_NAMES[r.platform] || r.platform)}</span></td>
+                <td>${escapeHtml(r.streamer_name || '-')}</td>
+                <td title="${escapeHtml(r.title || '')}">${r.title ? escapeHtml(r.title.length > 25 ? r.title.substring(0, 25) + '...' : r.title) : '-'}</td>
                 <td>
                     ${r.is_live
                         ? '<span class="status-badge status-live"><span class="dot dot-green"></span>直播中</span>'
@@ -139,6 +150,7 @@ async function loadRooms() {
                         <button class="btn btn-sm btn-icon" onclick="toggleRoom(${r.id}, ${!r.enabled})" title="${r.enabled ? '禁用' : '启用'}">
                             ${r.enabled ? '禁用' : '启用'}
                         </button>
+                        <button class="btn btn-sm btn-secondary" onclick="showEditRoomModal(${r.id})" title="编辑房间信息">编辑</button>
                         <button class="btn btn-sm btn-icon" onclick="deleteRoom(${r.id})" title="删除">删除</button>
                     </div>
                 </td>
@@ -154,6 +166,7 @@ async function loadRooms() {
 function showAddRoomModal() {
     document.getElementById('addRoomModal').style.display = 'flex';
     document.getElementById('roomUrl').value = '';
+    document.getElementById('roomStreamerName').value = '';
     document.getElementById('roomRemark').value = '';
     document.getElementById('platformHint').textContent = '支持抖音、B站、快手 — 自动识别平台';
     document.getElementById('roomUrl').focus();
@@ -178,9 +191,10 @@ async function submitAddRoom() {
 
     const quality = document.getElementById('roomQuality').value;
     const remark = document.getElementById('roomRemark').value.trim();
+    const streamer_name = document.getElementById('roomStreamerName').value.trim();
 
     try {
-        const result = await API.post('/api/rooms', { url, quality, remark, enabled: true });
+        const result = await API.post('/api/rooms', { url, quality, remark, streamer_name: streamer_name || null, enabled: true });
         if (result.message) {
             showToast('添加成功', 'success');
             hideAddRoomModal();
@@ -190,6 +204,70 @@ async function submitAddRoom() {
         }
     } catch (e) {
         showToast('添加失败', 'error');
+    }
+}
+
+// 编辑房间
+let editingRoom = null;
+
+async function showEditRoomModal(id) {
+    try {
+        const rooms = await API.get('/api/rooms');
+        const room = rooms.find(r => r.id === id);
+        if (!room) { showToast('房间不存在，请刷新列表', 'error'); return; }
+
+        editingRoom = room;
+        document.getElementById('editRoomUrl').value = room.url || '';
+        document.getElementById('editRoomQuality').value = room.quality || 'origin';
+        document.getElementById('editRoomStreamerName').value = room.streamer_name || '';
+        document.getElementById('editRoomRemark').value = room.remark || '';
+        document.getElementById('editRoomModal').style.display = 'flex';
+    } catch (e) {
+        console.error('Load room for edit error:', e);
+        showToast('加载房间信息失败', 'error');
+    }
+}
+
+function hideEditRoomModal() {
+    document.getElementById('editRoomModal').style.display = 'none';
+    editingRoom = null;
+}
+
+async function submitEditRoom() {
+    if (!editingRoom) return;
+
+    const url = document.getElementById('editRoomUrl').value.trim();
+    if (!url) { showToast('请输入直播间地址', 'error'); return; }
+
+    const quality = document.getElementById('editRoomQuality').value;
+    const streamer_name = document.getElementById('editRoomStreamerName').value.trim();
+    const remark = document.getElementById('editRoomRemark').value.trim();
+
+    // 只提交有变化的字段；URL 未变时不传，避免触发平台缓存重建
+    const payload = {};
+    if (url !== editingRoom.url) payload.url = url;
+    if (quality !== editingRoom.quality) payload.quality = quality;
+    if (streamer_name !== (editingRoom.streamer_name || '')) payload.streamer_name = streamer_name;
+    if (remark !== (editingRoom.remark || '')) payload.remark = remark;
+
+    if (Object.keys(payload).length === 0) {
+        showToast('没有修改任何内容', 'info');
+        hideEditRoomModal();
+        return;
+    }
+
+    try {
+        const res = await API.put(`/api/rooms/${editingRoom.id}`, payload);
+        if (res.message) {
+            showToast('保存成功', 'success');
+            hideEditRoomModal();
+            loadRooms();
+            if (payload.url) setTimeout(() => loadRooms(), 5000);
+        } else if (res.detail) {
+            showToast(res.detail, 'error');
+        }
+    } catch (e) {
+        showToast('保存失败', 'error');
     }
 }
 
@@ -256,9 +334,9 @@ async function loadRecordings() {
 
             return `
                 <tr>
-                    <td><span class="platform-tag ${PLATFORM_TAGS[r.platform] || ''}">${PLATFORM_NAMES[r.platform] || r.platform}</span></td>
-                    <td>${r.streamer_name || '-'}</td>
-                    <td title="${r.file_name || ''}">${r.file_name ? (r.file_name.length > 30 ? r.file_name.substring(0, 30) + '...' : r.file_name) : '-'}</td>
+                    <td><span class="platform-tag ${PLATFORM_TAGS[r.platform] || ''}">${escapeHtml(PLATFORM_NAMES[r.platform] || r.platform)}</span></td>
+                    <td>${escapeHtml(r.streamer_name || '-')}</td>
+                    <td title="${escapeHtml(r.file_name || '')}">${r.file_name ? escapeHtml(r.file_name.length > 30 ? r.file_name.substring(0, 30) + '...' : r.file_name) : '-'}</td>
                     <td>${r.file_size_mb > 0 ? formatSize(r.file_size_mb) : '-'}</td>
                     <td>${formatDuration(r.duration)}</td>
                     <td><span class="status-badge ${statusClass}">${statusText}</span></td>
@@ -286,17 +364,17 @@ async function loadFiles() {
 
         tbody.innerHTML = files.map(f => `
             <tr>
-                <td class="col-check"><input type="checkbox" class="file-check" data-path="${f.path}" onchange="updateMergeBtn()"></td>
-                <td title="${f.name}">${f.name.length > 35 ? f.name.substring(0, 35) + '...' : f.name}</td>
-                <td><span class="platform-tag">${f.platform}</span></td>
-                <td>${f.streamer}</td>
+                <td class="col-check"><input type="checkbox" class="file-check" data-path="${escapeHtml(f.path)}" onchange="updateMergeBtn()"></td>
+                <td title="${escapeHtml(f.name)}">${escapeHtml(f.name.length > 35 ? f.name.substring(0, 35) + '...' : f.name)}</td>
+                <td><span class="platform-tag">${escapeHtml(f.platform)}</span></td>
+                <td>${escapeHtml(f.streamer || '-')}</td>
                 <td>${formatSize(f.size_mb)}</td>
                 <td>${formatTime(new Date(f.modified_time * 1000).toISOString())}</td>
                 <td>
                     <div class="action-group">
-                        ${f.is_video ? `<button class="btn btn-sm btn-secondary" onclick="playFile('${f.path}')">播放</button>` : ''}
-                        <a class="btn btn-sm btn-secondary" href="/api/files/download/${f.path}" download>下载</a>
-                        <button class="btn btn-sm btn-danger" onclick="deleteFile('${f.path}')">删除</button>
+                        ${f.is_video ? `<button class="btn btn-sm btn-secondary" data-act="play" data-path="${escapeHtml(f.path)}">播放</button>` : ''}
+                        <a class="btn btn-sm btn-secondary" href="/api/files/download/${f.path.split('/').map(encodeURIComponent).join('/')}" download>下载</a>
+                        <button class="btn btn-sm btn-danger" data-act="delete" data-path="${escapeHtml(f.path)}">删除</button>
                     </div>
                 </td>
             </tr>
@@ -448,7 +526,7 @@ async function loadSettings() {
                 <div class="log-entry">
                     <span class="log-time">${formatTime(l.created_at)}</span>
                     <span class="log-level ${l.level}">${l.level.toUpperCase()}</span>
-                    <span class="log-msg">${l.message}</span>
+                    <span class="log-msg">${escapeHtml(l.message)}</span>
                 </div>
             `).join('');
         }
@@ -545,7 +623,7 @@ function updateFilenamePreview() {
 
     const el = document.getElementById('filenamePreview');
     if (el) {
-        el.innerHTML = `输出示例：<code>${outputDir}/抖音/主播名/2026-07-26/${base}.${fmt}</code>`;
+        el.textContent = `输出示例：${outputDir}/抖音/主播名/2026-07-26/${base}.${fmt}`;
     }
 }
 
@@ -651,12 +729,25 @@ document.addEventListener('DOMContentLoaded', () => {
     refreshTimer = setInterval(() => {
         if (currentPage === 'dashboard') refreshDashboard();
     }, 15000);
+
+    // 文件表格操作按钮：事件委托（路径含引号时内联 onclick 字符串拼接会被破坏）
+    const filesBody = document.getElementById('filesTableBody');
+    if (filesBody) {
+        filesBody.addEventListener('click', (e) => {
+            const btn = e.target.closest('button[data-act]');
+            if (!btn) return;
+            const p = btn.dataset.path || '';
+            if (btn.dataset.act === 'play') playFile(p);
+            else if (btn.dataset.act === 'delete') deleteFile(p);
+        });
+    }
 });
 
 // 键盘快捷键
 document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
         hideAddRoomModal();
+        hideEditRoomModal();
         hidePlayer();
     }
 });

@@ -293,7 +293,9 @@ class LiveMonitor:
                     "is_live": info.is_live,
                     "last_check_time": now,
                     "title": info.title or room.title,
-                    "streamer_name": info.streamer_name or room.streamer_name,
+                    # 手动填写的主播名优先（编辑弹窗承诺：清空才恢复自动探测），
+                    # 探测结果只回填空值
+                    "streamer_name": room.streamer_name or info.streamer_name,
                     "room_id": info.room_id or room.room_id,
                 }
 
@@ -346,9 +348,12 @@ class LiveMonitor:
     async def _start_recording(self, room: Room, info: RoomInfo):
         """开播/手动开始：开启一场新录制（一条 Recording + 首个 part）"""
         fmt = room.quality if room.quality and room.quality != "origin" else settings.record_format
+        # 主播名优先级：手动填写 > 平台探测 > 备注 > 房间ID。
+        # 平台游客态常拿不到主播名，若不回退备注，文件名/目录会退化为纯房间号。
+        streamer = room.streamer_name or info.streamer_name or room.remark or room.room_id
         final_path, part_target = recorder.build_session_target(
             room.platform,
-            info.streamer_name or room.streamer_name or room.room_id,
+            streamer,
             room.room_id,
             part_index=1,
             record_format=fmt,
@@ -362,7 +367,7 @@ class LiveMonitor:
             room_db_id=room.id,
             stream_url=info.stream_url,
             platform=room.platform,
-            streamer_name=info.streamer_name or room.streamer_name or room.room_id,
+            streamer_name=streamer,
             room_id=info.room_id or room.room_id,
             record_format=fmt,
             output_path=part_target,
@@ -447,7 +452,7 @@ class LiveMonitor:
                 room_db_id=room.id,
                 stream_url=info.stream_url,
                 platform=room.platform,
-                streamer_name=info.streamer_name or room.streamer_name or room.room_id,
+                streamer_name=room.streamer_name or info.streamer_name or room.remark or room.room_id,
                 room_id=info.room_id or room.room_id,
                 record_format=fmt,
                 output_path=part_target,

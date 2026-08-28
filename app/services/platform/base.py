@@ -52,10 +52,11 @@ class BasePlatform(ABC):
         """从URL中提取房间ID"""
         pass
 
+    @classmethod
     @abstractmethod
-    def match_url(self, url: str) -> bool:
-        """判断URL是否属于当前平台"""
-        pass
+    def match_url(cls, url: str) -> bool:
+        """判断URL是否属于当前平台（纯URL判断，不依赖实例状态，供 detect_platform 免实例调用）"""
+        raise NotImplementedError
 
     async def _fetch(self, url: str, headers: dict = None, params: dict = None) -> httpx.Response:
         """发送HTTP请求"""
@@ -96,7 +97,6 @@ class PlatformFactory:
     @classmethod
     def register(cls, platform_class: type):
         """注册平台适配器"""
-        instance_keys = platform_class.platform_name
         cls._platforms[platform_class.platform_name] = platform_class
         return platform_class
 
@@ -110,10 +110,14 @@ class PlatformFactory:
 
     @classmethod
     def detect_platform(cls, url: str) -> Optional[str]:
-        """根据URL自动检测平台"""
+        """根据URL自动检测平台
+
+        match_url 为纯 URL 判断（classmethod），直接在类上调用；
+        不再实例化适配器——构造函数会创建 httpx.AsyncClient，原实现在
+        添加/导入/改URL 等高频路径上每次泄漏未关闭的 client。
+        """
         for name, platform_class in cls._platforms.items():
-            instance = platform_class()
-            if instance.match_url(url):
+            if platform_class.match_url(url):
                 return name
         return None
 

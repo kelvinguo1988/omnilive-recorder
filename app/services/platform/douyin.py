@@ -15,7 +15,8 @@ class DouyinPlatform(BasePlatform):
 
     platform_name = "douyin"
 
-    def match_url(self, url: str) -> bool:
+    @classmethod
+    def match_url(cls, url: str) -> bool:
         return any(domain in url for domain in ["live.douyin.com", "douyin.com", "iesdouyin.com"])
 
     def extract_room_id(self, url: str) -> str:

@@ -394,6 +394,11 @@
                 </select>
             </div>
             <div class="form-group">
+                <label>主播名 (可选)</label>
+                <input type="text" id="roomStreamerName" class="input" placeholder="填写后录制文件名/目录优先使用主播名">
+                <div class="form-hint">部分平台游客态拿不到主播名，会导致文件名退化为房间号，建议填写</div>
+            </div>
+            <div class="form-group">
                 <label>备注 (可选)</label>
                 <input type="text" id="roomRemark" class="input" placeholder="给这个房间加个备注">
             </div>
@@ -401,6 +406,45 @@
         <div class="modal-footer">
             <button class="btn btn-secondary" onclick="hideAddRoomModal()">取消</button>
             <button class="btn btn-primary" onclick="submitAddRoom()">添加</button>
+        </div>
+    </div>
+</div>
+
+<!-- 编辑房间弹窗 -->
+<div class="modal-overlay" id="editRoomModal" style="display:none">
+    <div class="modal">
+        <div class="modal-header">
+            <h2>编辑房间</h2>
+            <button class="btn-close" onclick="hideEditRoomModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div class="form-group">
+                <label>直播间地址</label>
+                <input type="text" id="editRoomUrl" class="input" placeholder="直播间URL">
+                <div class="form-hint">修改地址后会自动重算平台与房间ID，并触发一次重新检测</div>
+            </div>
+            <div class="form-group">
+                <label>录制画质</label>
+                <select id="editRoomQuality" class="select">
+                    <option value="origin">原画</option>
+                    <option value="blue_ray">蓝光</option>
+                    <option value="ultra">超清</option>
+                    <option value="high">高清</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>主播名 (可选)</label>
+                <input type="text" id="editRoomStreamerName" class="input" placeholder="用于录制文件名/目录；留空则自动探测">
+                <div class="form-hint">手动填写后即使平台探测不到，文件也会按主播名命名；清空则按 探测 &gt; 备注 &gt; 房间号 自动命名</div>
+            </div>
+            <div class="form-group">
+                <label>备注 (可选)</label>
+                <input type="text" id="editRoomRemark" class="input" placeholder="给这个房间加个备注">
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="hideEditRoomModal()">取消</button>
+            <button class="btn btn-primary" onclick="submitEditRoom()">保存</button>
         </div>
     </div>
 </div>

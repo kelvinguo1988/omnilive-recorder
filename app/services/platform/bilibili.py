@@ -24,7 +24,8 @@ class BilibiliPlatform(BasePlatform):
         "low": 80,
     }
 
-    def match_url(self, url: str) -> bool:
+    @classmethod
+    def match_url(cls, url: str) -> bool:
         return any(domain in url for domain in ["live.bilibili.com", "bilibili.com"])
 
     def extract_room_id(self, url: str) -> str:

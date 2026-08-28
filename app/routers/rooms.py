@@ -30,6 +30,7 @@ class RoomUpdate(BaseModel):
     quality: Optional[str] = None
     enabled: Optional[bool] = None
     remark: Optional[str] = None
+    streamer_name: Optional[str] = None
 
 
 class RoomImportItem(BaseModel):
@@ -196,7 +197,7 @@ async def import_rooms(payload: RoomsImport, db: AsyncSession = Depends(get_db))
 
 
 @router.put("/{room_id}")
-async def update_room(room_id: int, room: RoomUpdate, db: AsyncSession = Depends(get_db)):
+async def update_room(room_id: int, room: RoomUpdate, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_db)):
     """更新房间"""
     update_data = room.model_dump(exclude_none=True)
     if not update_data:
@@ -207,32 +208,38 @@ async def update_room(room_id: int, room: RoomUpdate, db: AsyncSession = Depends
     if not existing:
         raise HTTPException(status_code=404, detail="房间不存在")
 
+    # 文本字段统一去首尾空白，避免存入不可见的空白导致"看起来空实则非空"
+    for field in ("url", "quality", "remark", "streamer_name"):
+        if field in update_data and isinstance(update_data[field], str):
+            update_data[field] = update_data[field].strip()
+
     # 修改 URL 时同步重算 room_id 与平台（用于文件名 / 适配器选择）
     if "url" in update_data and update_data["url"]:
-        new_url = update_data["url"].strip()
+        new_url = update_data["url"]
         if not update_data.get("platform"):
             detected = PlatformFactory.detect_platform(new_url)
             if detected:
                 update_data["platform"] = detected
-        from app.services.platform.base import PlatformFactory as _PF
-        rid = _PF.get_platform(update_data.get("platform") or existing.platform)
-        if rid is None:
+        adapter = PlatformFactory.get_platform(update_data.get("platform") or existing.platform)
+        if adapter is None:
             # 退而用通用正则提取
             import re as _re
             m = _re.search(r'live\.kuaishou\.com/u/(\w+)|live\.kuaishou\.com/(\w+)|live\.douyin\.com/(\d+)|live\.bilibili\.com/(\d+)', new_url)
             update_data["room_id"] = (m.group(1) or m.group(2) or m.group(3) or m.group(4) or "") if m else ""
         else:
-            update_data["room_id"] = rid.extract_room_id(new_url)
+            update_data["room_id"] = adapter.extract_room_id(new_url)
         # 清空已缓存的平台适配器实例，下次检查按新 URL/平台重建
         # P0-2: 使用 _reset_platform_cache 先 close 旧实例再 clear，避免连接泄漏
         try:
-            from app.services.monitor import monitor
             await monitor._reset_platform_cache()
         except Exception:
             pass
 
     await db.execute(update(Room).where(Room.id == room_id).values(**update_data))
     await db.commit()
+
+    # 编辑后立即后台重新检测一次，标题/状态/主播名无需等下个监控周期才刷新
+    background_tasks.add_task(monitor.check_room_now, room_id)
 
     return {"message": "更新成功"}
 
