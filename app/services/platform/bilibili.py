@@ -79,6 +79,9 @@ class BilibiliPlatform(BasePlatform):
                 info.is_live = room_data.get("live_status", 0) == 1
                 info.cover_url = room_data.get("cover", "")
                 info.streamer_name = room_data.get("uname", "")
+                # 主播 uid：直播间↔主页互通的关键（作品订阅/主页地址解析都靠它）
+                if room_data.get("uid"):
+                    info.owner_user_id = str(room_data["uid"])
 
                 if info.is_live:
                     info.stream_url = await self._get_stream_url(room_id)
@@ -366,3 +369,30 @@ class BilibiliPlatform(BasePlatform):
         except Exception as e:
             logger.error(f"解析B站下载地址失败 {work.work_id}: {e}")
             return []
+
+    async def find_room_id_by_user(self, user_id: str) -> str:
+        """由 mid 解析直播间房间号。
+
+        B站直播短号机制：getRoomPlayInfo 的 room_id 参数可直接传 mid，
+        code=0 时 data.room_id 即真实房间号；60004 表示该 UP 没有直播间。
+        """
+        if not user_id:
+            return ""
+        try:
+            resp = await self.client.get(
+                "https://api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo",
+                params={
+                    "room_id": user_id, "protocol": "0,1", "format": "0,1,2",
+                    "codec": "0,1", "qn": 10000, "platform": "web", "ptype": 16,
+                },
+                headers=await self._api_headers("https://live.bilibili.com/"),
+            )
+            data = resp.json()
+            if data.get("code") == 0:
+                room_id = str((data.get("data") or {}).get("room_id") or "")
+                return room_id
+            # 60004 = 用户没有直播间，属正常情况，静默返回
+            return ""
+        except Exception as e:
+            logger.warning(f"B站 mid→直播间解析失败 {user_id}: {e}")
+            return ""

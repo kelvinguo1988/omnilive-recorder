@@ -133,6 +133,9 @@ class KuaishouPlatform(BasePlatform):
                     author = detail.get("author", {}) or {}
                     if isinstance(author, dict):
                         info.streamer_name = author.get("name", "") or author.get("kwaiId", "")
+                        # 主播 principal：直播间↔主页互通的关键（作品订阅依赖）
+                        if author.get("id"):
+                            info.owner_user_id = str(author["id"])
 
                 # 旧版结构兜底: ROOT_QUERY -> liveDetail
                 if not detail:
@@ -242,7 +245,10 @@ class KuaishouPlatform(BasePlatform):
             live_detail = data.get("data", {}).get("liveDetail", {})
             if live_detail:
                 info.is_live = live_detail.get("isLiving", False)
-                info.streamer_name = live_detail.get("user", {}).get("name", "")
+                user = live_detail.get("user", {})
+                info.streamer_name = user.get("name", "")
+                if user.get("id"):
+                    info.owner_user_id = str(user["id"])
 
                 live_stream = live_detail.get("liveStream", {})
                 if live_stream:
@@ -456,3 +462,32 @@ class KuaishouPlatform(BasePlatform):
         if covers and isinstance(covers[0], dict):
             w.cover_url = covers[0].get("url") or ""
         return w
+
+    async def find_room_id_by_user(self, user_id: str) -> str:
+        """由主页 eid/principal 解析直播 principalId（需登录 Cookie）。
+
+        快手 graphql visionProfile 的 userPhoto.id 即 principalId，
+        可直接用于 live_graphql 的 LiveDetail(principalId=...)。
+        """
+        if not user_id:
+            return ""
+        referer = f"https://www.kuaishou.com/profile/{user_id}"
+        try:
+            data = await self._ks_graphql(
+                "visionProfile",
+                """query visionProfile($userId: String) {
+                    visionProfile(userId: $userId) {
+                        result
+                        userPhoto { id }
+                    }
+                }""",
+                {"userId": user_id},
+                referer,
+            )
+            prof = (data.get("data") or {}).get("visionProfile") or {}
+            if prof.get("result") == 1:
+                return str(((prof.get("userPhoto") or {}).get("id")) or "")
+            return ""
+        except Exception as e:
+            logger.warning(f"快手 principal 解析失败 {user_id}: {e}")
+            return ""

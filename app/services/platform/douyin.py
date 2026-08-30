@@ -130,6 +130,9 @@ class DouyinPlatform(BasePlatform):
                             nick = owner.get("nickname", "")
                             if nick and not info.streamer_name:
                                 info.streamer_name = nick
+                            # 主播 sec_uid：直播间↔主页互通的关键（作品订阅依赖）
+                            if owner.get("sec_uid"):
+                                info.owner_user_id = owner["sec_uid"]
                         # 以接口返回的直播状态为准（2=直播中）
                         status = room_data.get("status")
                         if status is not None:
@@ -391,3 +394,30 @@ class DouyinPlatform(BasePlatform):
             if cover:
                 w.cover_url = cover[0]
         return w
+
+    async def find_room_id_by_user(self, user_id: str) -> str:
+        """由 sec_uid 解析直播间 web_rid（需登录 Cookie，游客态接口不返回 owner）。
+
+        enter API 支持 sec_user_id 入参：data.data.data[0].web_rid 即直播间号。
+        """
+        if not user_id:
+            return ""
+        try:
+            params = {
+                "aid": "6383", "app_name": "douyin_web", "device_platform": "web",
+                "enter_from": "web_live", "cookie_enabled": "true",
+                "browser_language": "zh-CN", "browser_platform": "Win32",
+                "browser_name": "Chrome", "browser_version": WORKS_UA_CHROME_VER,
+                "sec_user_id": user_id,
+            }
+            url = "https://live.douyin.com/webcast/room/web/enter/?" + self._sign_params(params)
+            resp = await self.client.get(url, headers=await self._works_headers())
+            data = resp.json()
+            if data.get("status_code") == 0:
+                rooms = (data.get("data") or {}).get("data") or []
+                if rooms and isinstance(rooms[0], dict):
+                    return str(rooms[0].get("web_rid") or "")
+            return ""
+        except Exception as e:
+            logger.warning(f"抖音 sec_uid→直播间解析失败 {user_id}: {e}")
+            return ""

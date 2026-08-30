@@ -24,7 +24,7 @@ function switchPage(page) {
     if (page === 'dashboard') refreshDashboard();
     else if (page === 'rooms') loadRooms();
     else if (page === 'recordings') loadRecordings();
-    else if (page === 'works') { loadCreators(); loadWorksTable(); }
+    else if (page === 'works') loadWorksPage();
     else if (page === 'files') loadFiles();
     else if (page === 'settings') loadSettings();
 }
@@ -115,43 +115,63 @@ async function refreshDashboard() {
     }
 }
 
-// 房间管理
+// 主播管理（统一实体：直播间地址=直播录制，主页地址=作品订阅）
 async function loadRooms() {
     try {
         const rooms = await API.get('/api/rooms');
         const tbody = document.getElementById('roomsTableBody');
 
         if (rooms.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="7" class="empty-state">还没有添加房间，点击右上角"添加房间"</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="7" class="empty-state">还没有添加主播，点击右上角"添加主播"</td></tr>';
             return;
+        }
+
+        // 同步作品页的主播过滤下拉
+        const filter = document.getElementById('worksCreatorFilter');
+        if (filter) {
+            const cur = filter.value;
+            filter.innerHTML = '<option value="">全部主播</option>' + rooms
+                .filter(r => r.works_enabled)
+                .map(r => `<option value="${r.id}">${escapeHtml(r.streamer_name || r.platform_user_id || r.id)}</option>`)
+                .join('');
+            filter.value = cur;
         }
 
         tbody.innerHTML = rooms.map(r => `
             <tr>
                 <td><span class="platform-tag ${PLATFORM_TAGS[r.platform] || ''}">${escapeHtml(PLATFORM_NAMES[r.platform] || r.platform)}</span></td>
-                <td>${escapeHtml(r.streamer_name || '-')}</td>
-                <td title="${escapeHtml(r.title || '')}">${r.title ? escapeHtml(r.title.length > 25 ? r.title.substring(0, 25) + '...' : r.title) : '-'}</td>
+                <td title="${escapeHtml(r.title || '')}">${escapeHtml(r.streamer_name || '-')}</td>
                 <td>
-                    ${r.is_live
-                        ? '<span class="status-badge status-live"><span class="dot dot-green"></span>直播中</span>'
-                        : '<span class="status-badge status-offline">未直播</span>'}
+                    ${r.url
+                        ? (r.is_live
+                            ? '<span class="status-badge status-live"><span class="dot dot-green"></span>直播中</span>'
+                            : '<span class="status-badge status-offline">未直播</span>')
+                        : '<span class="status-badge status-offline">未配置</span>'}
                 </td>
                 <td>
                     ${r.is_recording
                         ? '<span class="status-badge status-recording">录制中</span>'
                         : '<span class="status-badge status-offline">空闲</span>'}
                 </td>
+                <td title="已下载 ${r.works_completed} / 共 ${r.works_total}，失败 ${r.works_failed}">
+                    ${r.works_enabled
+                        ? `<label class="checkbox-label"><input type="checkbox" checked onchange="toggleWorks(${r.id}, this.checked)" /> ${r.works_completed}/${r.works_total}${r.backfill_done ? '' : ' <span class="status-badge status-recording">回填中</span>'}</label>`
+                        : (r.home_url || r.platform_user_id
+                            ? `<label class="checkbox-label"><input type="checkbox" onchange="toggleWorks(${r.id}, this.checked)" /> 未订阅</label>`
+                            : '<span class="status-badge status-offline">无主页</span>')}
+                </td>
                 <td>${formatTime(r.last_check_time)}</td>
                 <td>
                     <div class="action-group">
-                        <button class="btn btn-sm btn-secondary" onclick="checkRoom(${r.id})" title="检测">检测</button>
+                        ${r.url ? `<button class="btn btn-sm btn-secondary" onclick="checkRoom(${r.id})" title="检测直播">检测</button>` : ''}
                         ${r.is_recording
                             ? `<button class="btn btn-sm btn-danger" onclick="stopRecording(${r.id})">停止</button>`
                             : (r.is_live ? `<button class="btn btn-sm btn-primary" onclick="startRecording(${r.id})">录制</button>` : '')}
+                        ${r.works_enabled ? `<button class="btn btn-sm btn-secondary" onclick="checkWorksNow(${r.id})" title="检查新作品">查作品</button>` : ''}
+                        <button class="btn btn-sm btn-secondary" onclick="showEditRoomModal(${r.id})" title="编辑主播信息">编辑</button>
                         <button class="btn btn-sm btn-icon" onclick="toggleRoom(${r.id}, ${!r.enabled})" title="${r.enabled ? '禁用' : '启用'}">
                             ${r.enabled ? '禁用' : '启用'}
                         </button>
-                        <button class="btn btn-sm btn-secondary" onclick="showEditRoomModal(${r.id})" title="编辑房间信息">编辑</button>
                         <button class="btn btn-sm btn-icon" onclick="deleteRoom(${r.id})" title="删除">删除</button>
                     </div>
                 </td>
@@ -159,17 +179,39 @@ async function loadRooms() {
         `).join('');
     } catch (e) {
         console.error('Load rooms error:', e);
-        showToast('加载房间列表失败', 'error');
+        showToast('加载主播列表失败', 'error');
     }
 }
 
-// 添加房间
+async function toggleWorks(id, enabled) {
+    try {
+        const res = await API.put(`/api/rooms/${id}`, { works_enabled: enabled });
+        if (res.detail) {
+            showToast(res.detail, 'error');
+        } else {
+            showToast(enabled ? '已订阅作品，正在后台回填...' : '已取消作品订阅', enabled ? 'success' : 'info');
+        }
+        loadRooms();
+    } catch (e) { showToast('操作失败', 'error'); }
+}
+
+async function checkWorksNow(id) {
+    try {
+        await API.post(`/api/works/check/${id}`, {});
+        showToast('正在检查新作品...', 'info');
+        setTimeout(() => loadRooms(), 5000);
+    } catch (e) { showToast('检查失败', 'error'); }
+}
+
+// 添加主播
 function showAddRoomModal() {
     document.getElementById('addRoomModal').style.display = 'flex';
     document.getElementById('roomUrl').value = '';
+    document.getElementById('roomHomeUrl').value = '';
     document.getElementById('roomStreamerName').value = '';
     document.getElementById('roomRemark').value = '';
-    document.getElementById('platformHint').textContent = '支持抖音、B站、快手 — 自动识别平台';
+    document.getElementById('roomWorksEnabled').checked = false;
+    document.getElementById('platformHint').textContent = '直播间与主页地址至少填一个';
     document.getElementById('roomUrl').focus();
 }
 
@@ -180,24 +222,39 @@ function hideAddRoomModal() {
 function detectPlatform() {
     const url = document.getElementById('roomUrl').value;
     const hint = document.getElementById('platformHint');
-    if (url.includes('douyin.com')) hint.textContent = '检测到: 抖音平台';
-    else if (url.includes('bilibili.com')) hint.textContent = '检测到: B站平台';
-    else if (url.includes('kuaishou.com')) hint.textContent = '检测到: 快手平台';
-    else hint.textContent = '支持抖音、B站、快手 — 自动识别平台';
+    if (url.includes('douyin.com')) hint.textContent = '检测到: 抖音直播间';
+    else if (url.includes('bilibili.com')) hint.textContent = '检测到: B站直播间';
+    else if (url.includes('kuaishou.com')) hint.textContent = '检测到: 快手直播间';
+    else hint.textContent = '直播间与主页地址至少填一个';
+}
+
+function detectHomePlatform() {
+    const url = document.getElementById('roomHomeUrl').value;
+    const hint = document.getElementById('roomHomeUrl').parentElement.querySelector('.form-hint');
+    if (!hint) return;
+    if (url.includes('douyin.com/user/')) hint.textContent = '检测到: 抖音主页';
+    else if (url.includes('space.bilibili.com/')) hint.textContent = '检测到: B站空间';
+    else if (url.includes('kuaishou.com/profile/')) hint.textContent = '检测到: 快手主页';
+    else hint.textContent = '抖音: douyin.com/user/MS4w... · B站: space.bilibili.com/数字 · 快手: kuaishou.com/profile/xxx';
 }
 
 async function submitAddRoom() {
     const url = document.getElementById('roomUrl').value.trim();
-    if (!url) { showToast('请输入直播间地址', 'error'); return; }
+    const home_url = document.getElementById('roomHomeUrl').value.trim();
+    if (!url && !home_url) { showToast('直播间地址与主页地址至少填一个', 'error'); return; }
 
     const quality = document.getElementById('roomQuality').value;
     const remark = document.getElementById('roomRemark').value.trim();
     const streamer_name = document.getElementById('roomStreamerName').value.trim();
+    const works_enabled = document.getElementById('roomWorksEnabled').checked;
 
     try {
-        const result = await API.post('/api/rooms', { url, quality, remark, streamer_name: streamer_name || null, enabled: true });
+        const result = await API.post('/api/rooms', {
+            url: url || null, home_url: home_url || null, quality, remark,
+            streamer_name: streamer_name || null, works_enabled, enabled: true,
+        });
         if (result.message) {
-            showToast('添加成功', 'success');
+            showToast(result.message, 'success');
             hideAddRoomModal();
             loadRooms();
         } else if (result.detail) {
@@ -208,24 +265,26 @@ async function submitAddRoom() {
     }
 }
 
-// 编辑房间
+// 编辑主播
 let editingRoom = null;
 
 async function showEditRoomModal(id) {
     try {
         const rooms = await API.get('/api/rooms');
         const room = rooms.find(r => r.id === id);
-        if (!room) { showToast('房间不存在，请刷新列表', 'error'); return; }
+        if (!room) { showToast('主播不存在，请刷新列表', 'error'); return; }
 
         editingRoom = room;
         document.getElementById('editRoomUrl').value = room.url || '';
+        document.getElementById('editRoomHomeUrl').value = room.home_url || '';
         document.getElementById('editRoomQuality').value = room.quality || 'origin';
         document.getElementById('editRoomStreamerName').value = room.streamer_name || '';
         document.getElementById('editRoomRemark').value = room.remark || '';
+        document.getElementById('editRoomWorksEnabled').checked = !!room.works_enabled;
         document.getElementById('editRoomModal').style.display = 'flex';
     } catch (e) {
         console.error('Load room for edit error:', e);
-        showToast('加载房间信息失败', 'error');
+        showToast('加载主播信息失败', 'error');
     }
 }
 
@@ -238,18 +297,21 @@ async function submitEditRoom() {
     if (!editingRoom) return;
 
     const url = document.getElementById('editRoomUrl').value.trim();
-    if (!url) { showToast('请输入直播间地址', 'error'); return; }
-
+    const home_url = document.getElementById('editRoomHomeUrl').value.trim();
+    if (!url && !home_url) { showToast('直播间地址与主页地址至少保留一个', 'error'); return; }
     const quality = document.getElementById('editRoomQuality').value;
     const streamer_name = document.getElementById('editRoomStreamerName').value.trim();
     const remark = document.getElementById('editRoomRemark').value.trim();
+    const works_enabled = document.getElementById('editRoomWorksEnabled').checked;
 
-    // 只提交有变化的字段；URL 未变时不传，避免触发平台缓存重建
+    // 只提交有变化的字段；地址未变时不传，避免触发平台缓存重建
     const payload = {};
-    if (url !== editingRoom.url) payload.url = url;
+    if (url !== (editingRoom.url || '')) payload.url = url;
+    if (home_url !== (editingRoom.home_url || '')) payload.home_url = home_url;
     if (quality !== editingRoom.quality) payload.quality = quality;
     if (streamer_name !== (editingRoom.streamer_name || '')) payload.streamer_name = streamer_name;
     if (remark !== (editingRoom.remark || '')) payload.remark = remark;
+    if (works_enabled !== !!editingRoom.works_enabled) payload.works_enabled = works_enabled;
 
     if (Object.keys(payload).length === 0) {
         showToast('没有修改任何内容', 'info');
@@ -263,7 +325,7 @@ async function submitEditRoom() {
             showToast('保存成功', 'success');
             hideEditRoomModal();
             loadRooms();
-            if (payload.url) setTimeout(() => loadRooms(), 5000);
+            if (payload.url || payload.works_enabled) setTimeout(() => loadRooms(), 5000);
         } else if (res.detail) {
             showToast(res.detail, 'error');
         }
@@ -489,116 +551,9 @@ async function mergeSelected() {
     }
 }
 
-// 作品订阅
-async function loadCreators() {
-    try {
-        const creators = await API.get('/api/works/creators');
-        const tbody = document.getElementById('creatorsTableBody');
-
-        // 同步创作者过滤下拉
-        const filter = document.getElementById('worksCreatorFilter');
-        if (filter) {
-            const cur = filter.value;
-            filter.innerHTML = '<option value="">全部创作者</option>' + creators.map(c =>
-                `<option value="${c.id}">${escapeHtml(c.nickname || c.platform_user_id)}</option>`
-            ).join('');
-            filter.value = cur;
-        }
-
-        if (creators.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="9" class="empty-state">还没有订阅创作者，点击右上角"添加创作者"</td></tr>';
-            return;
-        }
-
-        tbody.innerHTML = creators.map(c => `
-            <tr>
-                <td><span class="platform-tag">${escapeHtml(c.platform_name)}</span></td>
-                <td>${escapeHtml(c.nickname || '-')}${c.backfill_done ? '' : ' <span class="status-badge status-recording">回填中</span>'}</td>
-                <td>${c.work_total}</td>
-                <td>${c.completed_count}</td>
-                <td>${c.pending_count} / ${c.failed_count}</td>
-                <td>${c.total_size_mb > 0 ? formatSize(c.total_size_mb) : '-'}</td>
-                <td>${formatTime(c.latest_publish_time)}</td>
-                <td>${formatTime(c.last_check_time)}</td>
-                <td>
-                    <div class="action-group">
-                        <button class="btn btn-sm btn-secondary" onclick="checkCreatorNow(${c.id})" title="立即检查新作品">检查</button>
-                        <button class="btn btn-sm btn-icon" onclick="toggleCreator(${c.id}, ${!c.enabled})">${c.enabled ? '禁用' : '启用'}</button>
-                        <button class="btn btn-sm btn-danger" onclick="deleteCreator(${c.id})">删除</button>
-                    </div>
-                </td>
-            </tr>
-        `).join('');
-    } catch (e) {
-        console.error('Load creators error:', e);
-    }
-}
-
-function showAddCreatorModal() {
-    document.getElementById('addCreatorModal').style.display = 'flex';
-    document.getElementById('creatorUrl').value = '';
-    document.getElementById('creatorRemark').value = '';
-    document.getElementById('creatorPlatformHint').textContent =
-        '抖音: douyin.com/user/MS4w... · B站: space.bilibili.com/数字 · 快手: kuaishou.com/profile/xxx';
-    document.getElementById('creatorUrl').focus();
-}
-
-function hideAddCreatorModal() {
-    document.getElementById('addCreatorModal').style.display = 'none';
-}
-
-function detectCreatorPlatform() {
-    const url = document.getElementById('creatorUrl').value;
-    const hint = document.getElementById('creatorPlatformHint');
-    if (url.includes('douyin.com/user/')) hint.textContent = '检测到: 抖音主页';
-    else if (url.includes('space.bilibili.com/')) hint.textContent = '检测到: B站空间';
-    else if (url.includes('kuaishou.com/profile/')) hint.textContent = '检测到: 快手主页';
-    else hint.textContent = '抖音: douyin.com/user/MS4w... · B站: space.bilibili.com/数字 · 快手: kuaishou.com/profile/xxx';
-}
-
-async function submitAddCreator() {
-    const home_url = document.getElementById('creatorUrl').value.trim();
-    if (!home_url) { showToast('请输入创作者主页链接', 'error'); return; }
-    const remark = document.getElementById('creatorRemark').value.trim();
-
-    try {
-        const result = await API.post('/api/works/creators', { home_url, remark: remark || null, enabled: true });
-        if (result.message) {
-            showToast(result.message, 'success');
-            hideAddCreatorModal();
-            loadCreators();
-        } else if (result.detail) {
-            showToast(result.detail, 'error');
-        }
-    } catch (e) {
-        showToast('添加失败', 'error');
-    }
-}
-
-async function checkCreatorNow(id) {
-    try {
-        await API.post(`/api/works/creators/${id}/check`, {});
-        showToast('正在检查新作品...', 'info');
-        setTimeout(() => { loadCreators(); loadWorksTable(); }, 5000);
-    } catch (e) { showToast('检查失败', 'error'); }
-}
-
-async function toggleCreator(id, enabled) {
-    try {
-        await API.put(`/api/works/creators/${id}`, { enabled });
-        showToast(enabled ? '已启用' : '已禁用', 'success');
-        loadCreators();
-    } catch (e) { showToast('操作失败', 'error'); }
-}
-
-async function deleteCreator(id) {
-    if (!confirm('确认删除该创作者订阅？作品记录会一并删除（已下载的文件保留在磁盘）。')) return;
-    try {
-        await API.delete(`/api/works/creators/${id}`);
-        showToast('删除成功', 'success');
-        loadCreators();
-        loadWorksTable();
-    } catch (e) { showToast('删除失败', 'error'); }
+// 作品订阅（列表页；主播的订阅入口在「主播管理」页）
+async function loadWorksPage() {
+    await loadWorksTable();
 }
 
 async function loadWorksTable() {
@@ -654,7 +609,7 @@ async function retryWork(id) {
     try {
         const res = await API.post(`/api/works/${id}/retry`, {});
         showToast(res.message || '已加入下载队列', 'success');
-        setTimeout(() => { loadCreators(); loadWorksTable(); }, 3000);
+        setTimeout(() => { loadRooms(); loadWorksTable(); }, 3000);
     } catch (e) { showToast('操作失败', 'error'); }
 }
 
@@ -663,7 +618,7 @@ async function deleteWork(id) {
     try {
         await API.delete(`/api/works/${id}`);
         showToast('删除成功', 'success');
-        loadCreators();
+        loadRooms();
         loadWorksTable();
     } catch (e) { showToast('删除失败', 'error'); }
 }

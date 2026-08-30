@@ -12,7 +12,8 @@ from app.models import Room, Recording, SystemLog
 from app.config import settings
 from app.services.recorder import recorder
 from app.services.file_manager import file_manager
-from app.services.platform import PlatformFactory, RoomInfo
+from app.services.platform import RoomInfo
+from app.services.platform_manager import platform_manager
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +25,6 @@ class LiveMonitor:
         self._task: Optional[asyncio.Task] = None
         self._refresh_task: Optional[asyncio.Task] = None
         self._running = False
-        self._platform_instances: dict = {}
         self._room_states: dict[int, dict] = {}
         # 串行化所有重连/换地址操作，避免刷新循环与断流重连同时对同一房间重启 ffmpeg
         self._reconnect_lock = asyncio.Lock()
@@ -32,52 +32,12 @@ class LiveMonitor:
         self._last_log_cleanup: float = 0.0
 
     async def _get_platform(self, platform_name: str):
-        """获取平台适配器实例（cookie/proxy 变化则自动重建，避免缓存到过期空Cookie）"""
-        cookie = ""
-        if platform_name == "douyin":
-            cookie = settings.douyin_cookie
-        elif platform_name == "bilibili":
-            cookie = settings.bilibili_cookie
-        elif platform_name == "kuaishou":
-            cookie = settings.kuaishou_cookie
-        proxy = settings.proxy_addr if settings.enable_proxy else ""
-
-        cached = self._platform_instances.get(platform_name)
-        # cookie 或 proxy 变化（或首次）→ 重建实例，使最新的 Cookie 立即生效
-        if cached is not None and getattr(cached, "cookie", None) == cookie \
-                and getattr(cached, "proxy", None) == proxy:
-            return cached
-
-        # P0-2: 重建前先关闭旧实例，避免 httpx.AsyncClient 连接池泄漏
-        if cached is not None:
-            try:
-                await cached.close()
-            except Exception:
-                pass
-
-        instance = PlatformFactory.get_platform(
-            platform_name,
-            proxy=proxy,
-            cookie=cookie,
-            timeout=settings.check_timeout,
-        )
-        if instance:
-            self._platform_instances[platform_name] = instance
-
-        return self._platform_instances.get(platform_name)
+        """获取平台适配器实例（共享 PlatformManager，Cookie/代理变化自动重建）"""
+        return await platform_manager.get(platform_name)
 
     async def _reset_platform_cache(self):
-        """关闭并清空所有平台适配器实例（修改 cookie/proxy/URL 后调用）。
-
-        统一在此 close 旧实例的 httpx.AsyncClient，避免连接池泄漏（P0-2）。
-        替代直接操作 ``_platform_instances.clear()`` 的调用点。
-        """
-        for inst in list(self._platform_instances.values()):
-            try:
-                await inst.close()
-            except Exception:
-                pass
-        self._platform_instances.clear()
+        """清空共享适配器缓存（修改 Cookie/代理/URL 后调用）"""
+        await platform_manager.reset()
 
     async def start(self):
         """启动监控"""
@@ -117,13 +77,8 @@ class LiveMonitor:
             except Exception as e:
                 logger.warning(f"停止房间 {room_id} 录制进程失败: {e}")
 
-        # 关闭所有平台适配器实例
-        for platform_instance in list(self._platform_instances.values()):
-            try:
-                await platform_instance.close()
-            except Exception:
-                pass
-        self._platform_instances.clear()
+        # 关闭共享平台适配器实例
+        await platform_manager.reset()
 
         logger.info("直播监控调度器已停止")
 
@@ -297,6 +252,8 @@ class LiveMonitor:
                     # 探测结果只回填空值
                     "streamer_name": room.streamer_name or info.streamer_name,
                     "room_id": info.room_id or room.room_id,
+                    # 主播平台用户ID：作品订阅的依据，检测到即回填（不清空已有值）
+                    "platform_user_id": info.owner_user_id or room.platform_user_id,
                 }
 
                 if info.is_live and not was_live:

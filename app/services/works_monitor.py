@@ -1,8 +1,9 @@
-"""作品订阅监控 - 定时检测创作者新作品并自动下载
+"""作品订阅监控 - 定时检测主播新作品并自动下载
 
-独立于直播监控的 asyncio 循环：
-- 每个 works_poll_interval 检查所有启用创作者的最新作品列表
-- 首次添加的创作者全量回填历史作品（works_backfill_limit 可限制条数）
+与直播监控(monitor)平行的独立领域模块，仅通过 platform_manager 共享适配器实例：
+- 每 works_poll_interval 检查所有开启作品订阅的主播（rooms.works_enabled）
+- 主播的 platform_user_id 是订阅依据：主页地址解析得到，或直播间检测自动回填
+- 首次订阅全量回填历史作品（works_backfill_limit 可限制条数）
 - 新作品入库 status=pending，由下载队列按平台串行下载（随机间隔限速防风控）
 
 风控应对原则：请求签名(a_bogus/wbi)、登录态Cookie、随机化间隔、单平台并发=1、
@@ -23,15 +24,13 @@ from urllib.parse import urlparse
 from sqlalchemy import select, update
 
 from app.database import async_session
-from app.models import Creator, Work
+from app.models import Room, Work
 from app.config import settings
-from app.services.platform import PlatformFactory
-from app.services.platform.base import WorkInfo, WORKS_UA
+from app.services.platform.base import WorkInfo, WORKS_UA, PLATFORM_CN
+from app.services.platform_manager import platform_manager
 from app.services.recorder import recorder
 
 logger = logging.getLogger(__name__)
-
-PLATFORM_CN = {"douyin": "抖音", "bilibili": "B站", "kuaishou": "快手"}
 
 # 各平台下载 CDN 的请求头：B站/快手 CDN 校验 Referer，抖音 CDN 校验 UA 一致性
 DOWNLOAD_HEADERS = {
@@ -52,49 +51,11 @@ class WorksMonitor:
     def __init__(self):
         self._task: Optional[asyncio.Task] = None
         self._running = False
-        self._platform_instances: dict = {}
         # 每平台下载并发=1，避免同一平台并发请求触发风控
         self._download_sems: dict = {p: asyncio.Semaphore(1) for p in PLATFORM_CN}
         self._last_download_ts: dict = {}
         # 重入保护：API 触发的立即检查与循环检查不并发执行
         self._check_lock = asyncio.Lock()
-
-    # ---------- 平台适配器管理（同直播监控，Cookie 变化自动重建） ----------
-
-    async def _get_platform(self, platform_name: str):
-        cookie = ""
-        if platform_name == "douyin":
-            cookie = settings.douyin_cookie
-        elif platform_name == "bilibili":
-            cookie = settings.bilibili_cookie
-        elif platform_name == "kuaishou":
-            cookie = settings.kuaishou_cookie
-        proxy = settings.proxy_addr if settings.enable_proxy else ""
-
-        cached = self._platform_instances.get(platform_name)
-        if cached is not None and getattr(cached, "cookie", None) == cookie \
-                and getattr(cached, "proxy", None) == proxy:
-            return cached
-        if cached is not None:
-            try:
-                await cached.close()
-            except Exception:
-                pass
-
-        instance = PlatformFactory.get_platform(
-            platform_name, proxy=proxy, cookie=cookie, timeout=settings.check_timeout,
-        )
-        if instance:
-            self._platform_instances[platform_name] = instance
-        return self._platform_instances.get(platform_name)
-
-    async def _reset_platform_cache(self):
-        for inst in list(self._platform_instances.values()):
-            try:
-                await inst.close()
-            except Exception:
-                pass
-        self._platform_instances.clear()
 
     # ---------- 生命周期 ----------
 
@@ -121,7 +82,6 @@ class WorksMonitor:
             except Exception:
                 pass
             self._dl_client = None
-        await self._reset_platform_cache()
         logger.info("作品订阅监控已停止")
 
     async def _loop(self):
@@ -129,7 +89,7 @@ class WorksMonitor:
         await asyncio.sleep(5)
         while self._running:
             try:
-                await self.check_all_creators()
+                await self.check_all_rooms()
             except Exception as e:
                 logger.error(f"作品检查循环异常: {e}")
             try:
@@ -146,97 +106,111 @@ class WorksMonitor:
 
     # ---------- 检查 ----------
 
-    async def check_all_creators(self):
+    async def check_all_rooms(self):
+        """检查所有开启作品订阅且可用的主播"""
         async with async_session() as session:
-            result = await session.execute(select(Creator).where(Creator.enabled == True))
-            creators = result.scalars().all()
-        for creator in creators:
+            result = await session.execute(
+                select(Room).where(
+                    Room.enabled == True,
+                    Room.works_enabled == True,
+                    Room.platform_user_id != None,
+                    Room.platform_user_id != "",
+                )
+            )
+            rooms = result.scalars().all()
+        for room in rooms:
             if not self._running:
                 break
             try:
-                await self.check_creator(creator)
+                await self.check_room_works(room)
             except Exception as e:
-                logger.error(f"检查创作者 {creator.nickname or creator.id} 失败: {e}")
+                logger.error(f"检查主播作品 {room.streamer_name or room.id} 失败: {e}")
             await asyncio.sleep(random.uniform(*CHECK_JITTER))
 
-    async def check_creator_by_id(self, creator_id: int):
-        """API 触发的立即检查（按 id 重读创作者）"""
+    async def check_room_works_by_id(self, room_id: int):
+        """API 触发的立即检查（按 id 重读主播）"""
         async with async_session() as session:
-            result = await session.execute(select(Creator).where(Creator.id == creator_id))
-            creator = result.scalar_one_or_none()
-        if creator:
-            await self.check_creator(creator)
+            result = await session.execute(select(Room).where(Room.id == room_id))
+            room = result.scalar_one_or_none()
+        if room:
+            await self.check_room_works(room)
 
-    async def check_creator(self, creator: Creator):
-        """检查单个创作者：未回填则全量回填，否则增量拉最新一页"""
+    async def check_room_works(self, room: Room):
+        """检查单个主播的作品：未回填则全量回填，否则增量拉最新一页"""
+        if not room.platform_user_id:
+            return
         async with self._check_lock:
-            await self._check_creator_inner(creator)
+            await self._check_room_works_inner(room)
 
-    async def _check_creator_inner(self, creator: Creator):
-        adapter = await self._get_platform(creator.platform)
+    async def _check_room_works_inner(self, room: Room):
+        adapter = await platform_manager.get(room.platform)
         if not adapter:
-            logger.warning(f"作品订阅不支持的平台: {creator.platform}")
+            logger.warning(f"作品订阅不支持的平台: {room.platform}")
             return
 
-        # 昵称为空时补一次用户信息（添加时网络失败的可能已恢复）
-        if not creator.nickname:
-            info = await adapter.get_user_info(creator.platform_user_id)
-            if info.nickname:
+        # 主播名为空时补一次用户信息（添加时网络失败的可能已恢复）
+        if not room.streamer_name:
+            try:
+                info = await adapter.get_user_info(room.platform_user_id)
+            except Exception as e:
+                info = None
+                logger.warning(f"获取主播昵称失败 {room.platform_user_id}: {e}")
+            if info and info.nickname:
                 async with async_session() as session:
                     await session.execute(
-                        update(Creator).where(Creator.id == creator.id).values(
-                            nickname=info.nickname, avatar_url=info.avatar_url or None,
+                        update(Room).where(Room.id == room.id).values(
+                            streamer_name=info.nickname,
                         )
                     )
                     await session.commit()
-                creator.nickname = info.nickname
+                room.streamer_name = info.nickname
 
         added = 0
         try:
-            if not creator.backfill_done:
-                added = await self._backfill(creator, adapter)
+            if not room.backfill_done:
+                added = await self._backfill(room, adapter)
             else:
                 works, _, _ = await adapter.get_user_works(
-                    creator.platform_user_id, 0, settings.works_check_count
+                    room.platform_user_id, 0, settings.works_check_count
                 )
-                added = await self._insert_new_works(creator.id, works)
+                added = await self._insert_new_works(room.id, works)
         except Exception as e:
             # 拉取失败（风控/网络/Cookie）：保留 backfill_done=False，下个周期自动重试
             logger.warning(
-                f"作品拉取失败 [{PLATFORM_CN.get(creator.platform, creator.platform)}] "
-                f"{creator.nickname or creator.platform_user_id}: {e}"
+                f"作品拉取失败 [{PLATFORM_CN.get(room.platform, room.platform)}] "
+                f"{room.streamer_name or room.platform_user_id}: {e}"
             )
 
         now = datetime.utcnow()
         async with async_session() as session:
             await session.execute(
-                update(Creator).where(Creator.id == creator.id).values(last_check_time=now)
+                update(Room).where(Room.id == room.id).values(last_work_check_time=now)
             )
             await session.commit()
 
-        label = creator.nickname or creator.platform_user_id
-        logger.info(f"作品检查完成 [{PLATFORM_CN.get(creator.platform, creator.platform)}] {label}: 新增 {added} 条")
+        label = room.streamer_name or room.platform_user_id
+        logger.info(f"作品检查完成 [{PLATFORM_CN.get(room.platform, room.platform)}] {label}: 新增 {added} 条")
 
-    async def _backfill(self, creator: Creator, adapter) -> int:
+    async def _backfill(self, room: Room, adapter) -> int:
         """全量回填历史作品（翻页直到没有更多），works_backfill_limit 限制条数"""
         limit = settings.works_backfill_limit
         cursor = 0
         total = 0
         page_guard = 0
         truncated = False
-        label = creator.nickname or creator.platform_user_id
+        label = room.streamer_name or room.platform_user_id
         while True:
             works, next_cursor, has_more = await adapter.get_user_works(
-                creator.platform_user_id, cursor, settings.works_check_count
+                room.platform_user_id, cursor, settings.works_check_count
             )
             # 上限截断：只入库剩余配额内的作品
             if limit and total + len(works) > limit:
                 works = works[: max(limit - total, 0)]
                 truncated = True
-            total += await self._insert_new_works(creator.id, works)
+            total += await self._insert_new_works(room.id, works)
             page_guard += 1
             if limit and total >= limit:
-                logger.info(f"创作者 {label} 回填达到上限 {limit} 条，截断")
+                logger.info(f"主播 {label} 回填达到上限 {limit} 条，截断")
                 break
             if truncated or not has_more or not works or page_guard >= 500:
                 break
@@ -245,27 +219,27 @@ class WorksMonitor:
 
         async with async_session() as session:
             await session.execute(
-                update(Creator).where(Creator.id == creator.id).values(backfill_done=True)
+                update(Room).where(Room.id == room.id).values(backfill_done=True)
             )
             await session.commit()
-        logger.info(f"创作者 {label} 历史作品回填完成，共 {total} 条")
+        logger.info(f"主播 {label} 历史作品回填完成，共 {total} 条")
         return total
 
-    async def _insert_new_works(self, creator_id: int, works: list) -> int:
+    async def _insert_new_works(self, room_id: int, works: list) -> int:
         """作品入库（查重+唯一约束兜底），返回新增条数"""
         added = 0
         async with async_session() as session:
             for w in works:
                 exists = await session.execute(
                     select(Work.id).where(
-                        Work.creator_id == creator_id,
+                        Work.creator_id == room_id,
                         Work.platform_work_id == w.work_id,
                     )
                 )
                 if exists.first():
                     continue
                 session.add(Work(
-                    creator_id=creator_id,
+                    creator_id=room_id,
                     platform_work_id=w.work_id,
                     work_type=w.work_type,
                     title=(w.title or "")[:500],
@@ -293,21 +267,21 @@ class WorksMonitor:
         if not pendings:
             return
 
-        creator_cache: dict = {}
+        room_cache: dict = {}
         for work in pendings:
             if not self._running:
                 break
-            if work.creator_id not in creator_cache:
+            if work.creator_id not in room_cache:
                 async with async_session() as session:
                     res = await session.execute(
-                        select(Creator).where(Creator.id == work.creator_id)
+                        select(Room).where(Room.id == work.creator_id)
                     )
-                    creator_cache[work.creator_id] = res.scalar_one_or_none()
-            creator = creator_cache[work.creator_id]
-            if not creator or not creator.enabled:
+                    room_cache[work.creator_id] = res.scalar_one_or_none()
+            room = room_cache[work.creator_id]
+            if not room or not room.enabled or not room.works_enabled:
                 continue
 
-            platform = creator.platform
+            platform = room.platform
             async with self._download_sems[platform]:
                 # 平台级随机限速
                 gap = random.uniform(*DOWNLOAD_GAP)
@@ -315,7 +289,7 @@ class WorksMonitor:
                 if wait > 0:
                     await asyncio.sleep(wait)
                 try:
-                    await self._download_work(creator, work)
+                    await self._download_work(room, work)
                 except Exception as e:
                     logger.error(f"作品下载失败 [{platform}] {work.platform_work_id}: {e}")
                     async with async_session() as session:
@@ -328,9 +302,9 @@ class WorksMonitor:
                 finally:
                     self._last_download_ts[platform] = time.time()
 
-    async def _download_work(self, creator: Creator, work: Work):
+    async def _download_work(self, room: Room, work: Work):
         """下载单个作品（视频→单文件；图集→打包 zip），.part 临时文件原子改名"""
-        adapter = await self._get_platform(creator.platform)
+        adapter = await platform_manager.get(room.platform)
         if not adapter:
             raise RuntimeError("平台适配器不可用")
 
@@ -356,8 +330,8 @@ class WorksMonitor:
 
         dir_path = os.path.join(
             settings.output_dir, "works",
-            PLATFORM_CN.get(creator.platform, creator.platform),
-            recorder._sanitize_filename(creator.nickname or creator.platform_user_id),
+            PLATFORM_CN.get(room.platform, room.platform),
+            recorder._sanitize_filename(room.streamer_name or room.platform_user_id),
         )
         os.makedirs(dir_path, exist_ok=True)
 
@@ -391,9 +365,9 @@ class WorksMonitor:
             )
             await session.commit()
 
-        label = creator.nickname or creator.platform_user_id
+        label = room.streamer_name or room.platform_user_id
         logger.info(
-            f"作品下载完成 [{PLATFORM_CN.get(creator.platform, creator.platform)}] "
+            f"作品下载完成 [{PLATFORM_CN.get(room.platform, room.platform)}] "
             f"{label}: {os.path.basename(final_path)} ({round(size / 1024 / 1024, 2)} MB)"
         )
 

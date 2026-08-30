@@ -15,6 +15,9 @@ WORKS_UA = (
 )
 WORKS_UA_CHROME_VER = "131.0.0.0"
 
+# 平台中文名（展示/目录命名统一取此映射）
+PLATFORM_CN = {"douyin": "抖音", "bilibili": "B站", "kuaishou": "快手"}
+
 
 @dataclass
 class RoomInfo:
@@ -26,6 +29,9 @@ class RoomInfo:
     stream_url: str = ""
     cover_url: str = ""
     platform: str = ""
+    # 主播平台用户ID(sec_uid/mid/principal)：直播间↔主页互通的关键，
+    # 检测直播间时回填，之后无需主页地址即可订阅作品
+    owner_user_id: str = ""
 
 
 @dataclass
@@ -117,6 +123,14 @@ class BasePlatform(ABC):
         work 只有 work_id/work_type/title 可靠填充（来自 DB 记录）。
         """
         return work.download_urls
+
+    async def find_room_id_by_user(self, user_id: str) -> str:
+        """由主播平台用户ID解析直播间房间号（主页→直播间桥接）。
+
+        B站可用 getRoomPlayInfo 短号机制；抖音/快手需登录 Cookie。
+        解析失败返回空串，不抛异常。
+        """
+        return ""
 
     async def _fetch(self, url: str, headers: dict = None, params: dict = None) -> httpx.Response:
         """发送HTTP请求"""

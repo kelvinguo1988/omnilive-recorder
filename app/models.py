@@ -9,26 +9,39 @@ class Base(DeclarativeBase):
 
 
 class Room(Base):
-    """直播间房间"""
+    """主播（统一实体：直播间地址用于直播录制，主页地址用于作品订阅）
+
+    表名保持 rooms 以兼容历史录制记录外键；语义已从"直播间"升级为"主播"：
+    - url           直播间地址（空串=未配置，不监控直播）
+    - home_url      主页地址（空串=未配置；提供 platform_user_id 即可订阅作品）
+    - platform_user_id 平台用户ID(sec_uid/mid/principal)，直播间检测自动回填，
+      或由主页地址 URL 解析得到；作品订阅依赖此字段
+    """
     __tablename__ = "rooms"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    url = Column(String(500), nullable=False, comment="直播间地址")
+    url = Column(String(500), nullable=False, default="", comment="直播间地址(空=未配置直播监控)")
     platform = Column(String(50), nullable=False, comment="平台: douyin/bilibili/kuaishou")
-    room_id = Column(String(100), nullable=True, comment="房间ID")
+    room_id = Column(String(100), nullable=True, comment="直播间房间号/短ID")
+    home_url = Column(String(500), nullable=True, comment="主播主页地址(空=未配置作品订阅)")
+    platform_user_id = Column(String(150), nullable=True, comment="平台用户ID(sec_uid/mid/principal)")
+    works_enabled = Column(Boolean, default=False, comment="是否启用作品订阅")
+    backfill_done = Column(Boolean, default=False, comment="历史作品是否已全部回填")
+    last_work_check_time = Column(DateTime, nullable=True, comment="最后作品检查时间")
     title = Column(String(200), nullable=True, comment="直播标题")
     streamer_name = Column(String(100), nullable=True, comment="主播名称")
     quality = Column(String(50), default="origin", comment="录制画质")
-    enabled = Column(Boolean, default=True, comment="是否启用监控")
+    enabled = Column(Boolean, default=True, comment="是否启用（直播监控+作品订阅总开关）")
     is_live = Column(Boolean, default=False, comment="是否正在直播")
     is_recording = Column(Boolean, default=False, comment="是否正在录制")
-    last_check_time = Column(DateTime, nullable=True, comment="最后检测时间")
+    last_check_time = Column(DateTime, nullable=True, comment="最后直播检测时间")
     last_live_time = Column(DateTime, nullable=True, comment="最后直播时间")
     remark = Column(String(200), nullable=True, comment="备注")
     created_at = Column(DateTime, default=datetime.now(timezone.utc).replace(tzinfo=None), comment="创建时间")
     updated_at = Column(DateTime, default=datetime.now(timezone.utc).replace(tzinfo=None), onupdate=datetime.now(timezone.utc).replace(tzinfo=None), comment="更新时间")
 
     recordings = relationship("Recording", back_populates="room", cascade="all, delete-orphan")
+    works = relationship("Work", back_populates="room", cascade="all, delete-orphan")
 
 
 class Recording(Base):
@@ -62,38 +75,15 @@ class SystemLog(Base):
     created_at = Column(DateTime, default=datetime.now(timezone.utc).replace(tzinfo=None), comment="创建时间")
 
 
-class Creator(Base):
-    """作品订阅创作者（主播/UP主的非直播作品）"""
-    __tablename__ = "creators"
-    __table_args__ = (
-        UniqueConstraint("platform", "platform_user_id", name="uq_creator_platform_uid"),
-    )
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    platform = Column(String(50), nullable=False, comment="平台: douyin/bilibili/kuaishou")
-    platform_user_id = Column(String(150), nullable=False, comment="平台用户ID(sec_uid/mid/eid)")
-    nickname = Column(String(200), nullable=True, comment="昵称")
-    avatar_url = Column(String(500), nullable=True, comment="头像")
-    home_url = Column(String(500), nullable=False, comment="主页地址")
-    enabled = Column(Boolean, default=True, comment="是否启用监控")
-    backfill_done = Column(Boolean, default=False, comment="历史作品是否已全部回填")
-    last_check_time = Column(DateTime, nullable=True, comment="最后检查时间")
-    last_work_time = Column(DateTime, nullable=True, comment="最新作品发布时间")
-    remark = Column(String(200), nullable=True, comment="备注")
-    created_at = Column(DateTime, default=datetime.now(timezone.utc).replace(tzinfo=None), comment="创建时间")
-
-    works = relationship("Work", back_populates="creator", cascade="all, delete-orphan")
-
-
 class Work(Base):
-    """创作者作品（视频/图集）"""
+    """创作者作品（视频/图集）。creator_id 即所属主播 rooms.id（统一主播模型）。"""
     __tablename__ = "works"
     __table_args__ = (
         UniqueConstraint("creator_id", "platform_work_id", name="uq_work_creator_wid"),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    creator_id = Column(Integer, ForeignKey("creators.id"), nullable=False, comment="创作者ID")
+    creator_id = Column(Integer, ForeignKey("rooms.id"), nullable=False, comment="所属主播(rooms.id)")
     platform_work_id = Column(String(150), nullable=False, comment="平台作品ID(aweme_id/bvid/photo_id)")
     work_type = Column(String(20), default="video", comment="类型: video/images")
     title = Column(String(500), nullable=True, comment="标题/描述")
@@ -107,4 +97,4 @@ class Work(Base):
     downloaded_at = Column(DateTime, nullable=True, comment="下载完成时间")
     created_at = Column(DateTime, default=datetime.now(timezone.utc).replace(tzinfo=None), comment="入库时间")
 
-    creator = relationship("Creator", back_populates="works")
+    room = relationship("Room", back_populates="works")
