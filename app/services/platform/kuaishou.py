@@ -3,7 +3,9 @@ import re
 import json
 import logging
 from typing import Optional
-from app.services.platform.base import BasePlatform, RoomInfo, PlatformFactory
+from app.services.platform.base import (
+    BasePlatform, RoomInfo, PlatformFactory, UserInfo, WorkInfo, WORKS_UA,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -257,3 +259,200 @@ class KuaishouPlatform(BasePlatform):
             logger.error(f"GraphQL API获取快手房间信息失败: {e}")
 
         return info
+
+    # ---------- 作品订阅 ----------
+
+    @classmethod
+    def extract_user_id(cls, url: str) -> str:
+        """从主页URL提取用户ID（形如 https://www.kuaishou.com/profile/xxx）"""
+        m = re.search(r"kuaishou\.com/profile/([\w.-]+)", url)
+        return m.group(1) if m else ""
+
+    async def _ks_graphql(self, operation: str, query: str, variables: dict, referer: str):
+        """快手主站 GraphQL 请求。
+
+        游客首次调用前先 GET 一次主页拿 did 等游客 Cookie（httpx cookie jar 自动携带）；
+        配置了 kuaishou_cookie 时以手动 Cookie 头优先。
+        """
+        headers = {
+            "User-Agent": WORKS_UA,
+            "Referer": referer,
+            "Origin": "https://www.kuaishou.com",
+            "Accept": "*/*",
+        }
+        if self.cookie:
+            headers["Cookie"] = self.cookie
+        else:
+            # 预热游客 Cookie（仅一次）
+            if not getattr(self, "_ks_warmed", False):
+                try:
+                    await self.client.get(referer, headers={"User-Agent": WORKS_UA, "Accept": "text/html"})
+                    self._ks_warmed = True
+                except Exception:
+                    pass
+        payload = {"operationName": operation, "query": query, "variables": variables}
+        resp = await self.client.post("https://www.kuaishou.com/graphql", json=payload, headers=headers)
+        return resp.json()
+
+    async def get_user_info(self, user_id: str) -> UserInfo:
+        info = UserInfo(user_id=user_id)
+        if not user_id:
+            return info
+        referer = f"https://www.kuaishou.com/profile/{user_id}"
+        try:
+            data = await self._ks_graphql(
+                "visionProfile",
+                """query visionProfile($userId: String) {
+                    visionProfile(userId: $userId) {
+                        result
+                        userPhoto { id name headUrl }
+                    }
+                }""",
+                {"userId": user_id},
+                referer,
+            )
+            prof = (data.get("data") or {}).get("visionProfile") or {}
+            if prof.get("result") == 1:
+                up = prof.get("userPhoto") or {}
+                info.nickname = up.get("name") or ""
+                info.avatar_url = up.get("headUrl") or ""
+            else:
+                logger.warning(
+                    f"快手用户信息接口异常: result={prof.get('result')} "
+                    f"(游客被风控时需配置快手Cookie)"
+                )
+        except Exception as e:
+            logger.error(f"获取快手用户信息失败 {user_id}: {e}")
+        return info
+
+    # 图集字段（images/atlas）随版本存在性不定：先带全量字段查询，
+    # graphql 报字段不存在时降级为基础字段并记住
+    _PHOTO_LIST_QUERY_FULL = """query visionProfilePhotoList($userId: String, $page: Int, $webPageArea: String) {
+        visionProfilePhotoList(userId: $userId, page: $page, webPageArea: $webPageArea) {
+            result
+            feeds {
+                type
+                photo {
+                    id
+                    caption
+                    duration
+                    timestamp
+                    photoUrl
+                    coverUrls { url }
+                    images { url }
+                    atlas { images }
+                }
+            }
+            pcursor
+        }
+    }"""
+    _PHOTO_LIST_QUERY_BASIC = """query visionProfilePhotoList($userId: String, $page: Int, $webPageArea: String) {
+        visionProfilePhotoList(userId: $userId, page: $page, webPageArea: $webPageArea) {
+            result
+            feeds {
+                type
+                photo {
+                    id
+                    caption
+                    duration
+                    timestamp
+                    photoUrl
+                    coverUrls { url }
+                }
+            }
+            pcursor
+        }
+    }"""
+
+    async def get_user_works(self, user_id: str, cursor: int = 0, count: int = 20):
+        """分页获取作品。cursor 为页码-1（内部 page=cursor+1），pcursor 控制终止。"""
+        works = []
+        page = max(int(cursor), 0) + 1
+        referer = f"https://www.kuaishou.com/profile/{user_id}"
+        try:
+            query = self._PHOTO_LIST_QUERY_BASIC if getattr(self, "_ks_basic_query", False) \
+                else self._PHOTO_LIST_QUERY_FULL
+            data = await self._ks_graphql(
+                "visionProfilePhotoList", query,
+                {"userId": user_id, "page": page, "webPageArea": "home"},
+                referer,
+            )
+            # graphql 字段不存在等错误 → 降级基础字段重试一次
+            errors = data.get("errors")
+            if errors and not getattr(self, "_ks_basic_query", False):
+                msgs = " ".join(str(e.get("message", "")) for e in errors if isinstance(e, dict))
+                if "images" in msgs or "atlas" in msgs:
+                    self._ks_basic_query = True
+                    data = await self._ks_graphql(
+                        "visionProfilePhotoList", self._PHOTO_LIST_QUERY_BASIC,
+                        {"userId": user_id, "page": page, "webPageArea": "home"},
+                        referer,
+                    )
+
+            node = (data.get("data") or {}).get("visionProfilePhotoList") or {}
+            if node.get("result") not in (1, None):
+                raise RuntimeError(
+                    f"快手作品列表接口失败: result={node.get('result')} "
+                    f"(游客被风控时需配置快手Cookie)"
+                )
+
+            for feed in node.get("feeds") or []:
+                photo = (feed or {}).get("photo") or {}
+                w = self._photo_to_work(photo)
+                if w and w.work_id:
+                    works.append(w)
+
+            pcursor = str(node.get("pcursor") or "")
+            has_more = bool(works) and pcursor not in ("no_more", "", "None")
+            return works, page, has_more
+        except RuntimeError:
+            raise
+        except Exception as e:
+            logger.error(f"获取快手作品列表失败 {user_id}: {e}")
+            raise RuntimeError(f"获取快手作品列表失败: {e}") from e
+
+    @staticmethod
+    def _photo_to_work(photo: dict) -> Optional[WorkInfo]:
+        if not isinstance(photo, dict):
+            return None
+        w = WorkInfo()
+        w.work_id = str(photo.get("id") or "")
+        w.title = photo.get("caption") or ""
+        ts = int(photo.get("timestamp") or 0)
+        if ts > 10**12:  # 毫秒时间戳归一为秒
+            ts //= 1000
+        w.publish_ts = ts
+        dur = photo.get("duration") or 0
+        w.duration = dur / 1000.0 if dur > 2000 else float(dur)
+
+        # 图集: images[{url}] 或 atlas{images:[[url,...],...]}
+        img_urls = []
+        images = photo.get("images")
+        if isinstance(images, list):
+            for img in images:
+                if isinstance(img, dict) and img.get("url"):
+                    img_urls.append(img["url"])
+                elif isinstance(img, str) and img.startswith("http"):
+                    img_urls.append(img)
+        atlas = photo.get("atlas") or {}
+        if isinstance(atlas, dict):
+            for group in atlas.get("images") or []:
+                if isinstance(group, list) and group:
+                    first = group[0]
+                    if isinstance(first, str) and first.startswith("http"):
+                        img_urls.append(first)
+        if img_urls:
+            w.work_type = "images"
+            w.duration = 0
+            w.download_urls = img_urls
+            return w
+
+        url = photo.get("photoUrl") or ""
+        if isinstance(url, str) and url.startswith("//"):
+            url = "https:" + url
+        if url:
+            w.download_urls = [url]
+        covers = photo.get("coverUrls") or []
+        if covers and isinstance(covers[0], dict):
+            w.cover_url = covers[0].get("url") or ""
+        return w

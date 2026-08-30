@@ -25,6 +25,14 @@ class AppConfig(BaseSettings):
     # 避免「录几分钟就断」与重连空白。设为 0 关闭主动刷新（仅依赖断流重连）。
     stream_url_refresh_interval: int = 90
 
+    # 作品订阅：新作品检测轮询间隔（秒）与每次拉取条数。
+    # works_auto_download 关闭时仅入库不下载；works_backfill_limit 限制单个创作者
+    # 首次添加时的全量回填条数（0=不限制，回填全部历史作品）。
+    works_poll_interval: int = 600
+    works_check_count: int = 20
+    works_auto_download: bool = True
+    works_backfill_limit: int = 0
+
     # 存储设置
     output_dir: str = "/app/recordings"
     max_disk_usage: int = 90
@@ -80,6 +88,10 @@ def _get_mapping():
         "monitor_interval": int,
         "check_timeout": int,
         "stream_url_refresh_interval": int,
+        "works_poll_interval": int,
+        "works_check_count": int,
+        "works_auto_download": lambda x: x.lower() == "true",
+        "works_backfill_limit": int,
         "output_dir": str,
         "max_disk_usage": int,
         "host": str,
@@ -167,6 +179,10 @@ def save_config(config: AppConfig = None) -> bool:
     section["monitor_interval"] = str(config.monitor_interval)
     section["check_timeout"] = str(config.check_timeout)
     section["stream_url_refresh_interval"] = str(config.stream_url_refresh_interval)
+    section["works_poll_interval"] = str(config.works_poll_interval)
+    section["works_check_count"] = str(config.works_check_count)
+    section["works_auto_download"] = b(config.works_auto_download)
+    section["works_backfill_limit"] = str(config.works_backfill_limit)
     section["output_dir"] = str(config.output_dir)
     section["max_disk_usage"] = str(config.max_disk_usage)
     section["host"] = str(config.host)

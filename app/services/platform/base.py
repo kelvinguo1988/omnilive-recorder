@@ -1,12 +1,19 @@
 """平台适配器基类"""
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 import httpx
 import re
 import logging
 
 logger = logging.getLogger(__name__)
+
+# 作品订阅统一 UA：抖音 a_bogus 签名与请求必须使用同一 UA；其余平台沿用以保持一致
+WORKS_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+WORKS_UA_CHROME_VER = "131.0.0.0"
 
 
 @dataclass
@@ -19,6 +26,30 @@ class RoomInfo:
     stream_url: str = ""
     cover_url: str = ""
     platform: str = ""
+
+
+@dataclass
+class UserInfo:
+    """创作者主页信息"""
+    user_id: str = ""
+    nickname: str = ""
+    avatar_url: str = ""
+
+
+@dataclass
+class WorkInfo:
+    """单条作品信息（视频或图集）
+
+    download_urls: 视频为 1 个无水印地址；图集为 N 个图片地址（顺序）。
+    publish_ts: 发布时间 unix 秒（未知为 0）。
+    """
+    work_id: str = ""
+    work_type: str = "video"
+    title: str = ""
+    publish_ts: int = 0
+    duration: float = 0
+    download_urls: list = field(default_factory=list)
+    cover_url: str = ""
 
 
 class BasePlatform(ABC):
@@ -57,6 +88,35 @@ class BasePlatform(ABC):
     def match_url(cls, url: str) -> bool:
         """判断URL是否属于当前平台（纯URL判断，不依赖实例状态，供 detect_platform 免实例调用）"""
         raise NotImplementedError
+
+    @classmethod
+    @abstractmethod
+    def extract_user_id(cls, url: str) -> str:
+        """从创作者主页URL提取平台用户ID（sec_uid/mid/eid）"""
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_user_info(self, user_id: str) -> UserInfo:
+        """获取创作者昵称/头像"""
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_user_works(self, user_id: str, cursor: int = 0, count: int = 20):
+        """分页获取创作者作品列表。
+
+        返回 (works: list[WorkInfo], next_cursor: int, has_more: bool)。
+        cursor 语义由各平台自定（时间戳/页码），调用方原样回传。
+        """
+        raise NotImplementedError
+
+    async def get_download_urls(self, work: WorkInfo) -> list:
+        """解析作品下载地址。
+
+        列表接口已返回直链的平台（抖音/快手）默认直接返回；
+        B站等需二次解析的平台在子类覆写（可能触发额外 API 调用）。
+        work 只有 work_id/work_type/title 可靠填充（来自 DB 记录）。
+        """
+        return work.download_urls
 
     async def _fetch(self, url: str, headers: dict = None, params: dict = None) -> httpx.Response:
         """发送HTTP请求"""
@@ -107,6 +167,11 @@ class PlatformFactory:
         if platform_class:
             return platform_class(proxy=proxy, cookie=cookie, timeout=timeout)
         return None
+
+    @classmethod
+    def get_platform_class(cls, platform_name: str) -> Optional[type]:
+        """获取平台适配器类（用于免实例调用 extract_user_id 等 classmethod）"""
+        return cls._platforms.get(platform_name)
 
     @classmethod
     def detect_platform(cls, url: str) -> Optional[str]:

@@ -4,7 +4,11 @@ import hashlib
 import time
 import logging
 from typing import Optional
-from app.services.platform.base import BasePlatform, RoomInfo, PlatformFactory
+from app.services.platform.base import (
+    BasePlatform, RoomInfo, PlatformFactory, UserInfo, WorkInfo,
+    WORKS_UA, WORKS_UA_CHROME_VER,
+)
+from app.services.platform.vendor.abogus import ABogus
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +144,10 @@ class DouyinPlatform(BasePlatform):
         return ""
 
     async def _get_ttwid(self) -> str:
-        """获取ttwid cookie"""
+        """获取ttwid cookie（缓存，避免每次请求重复注册）"""
+        cached = getattr(self, "_ttwid_cache", None)
+        if cached:
+            return cached
         try:
             response = await self.client.post(
                 "https://ttwid.bytedance.com/ttwid/union/register/",
@@ -157,6 +164,7 @@ class DouyinPlatform(BasePlatform):
             cookies = response.cookies
             ttwid = cookies.get("ttwid", "")
             if ttwid:
+                self._ttwid_cache = ttwid
                 return ttwid
         except Exception:
             pass
@@ -238,3 +246,148 @@ class DouyinPlatform(BasePlatform):
             logger.error(f"提取HLS流地址失败: {e}")
 
         return ""
+
+    # ---------- 作品订阅 ----------
+
+    @classmethod
+    def extract_user_id(cls, url: str) -> str:
+        """从主页URL提取 sec_uid（形如 https://www.douyin.com/user/MS4wLjABAAAA...）"""
+        m = re.search(r"douyin\.com/user/([A-Za-z0-9_-]+)", url)
+        return m.group(1) if m else ""
+
+    async def _works_headers(self) -> dict:
+        """作品接口请求头。
+
+        UA 必须与 a_bogus 签名时的 UA 一致；Cookie 合并 ttwid（游客态必备）。
+        """
+        cookie = self.cookie or ""
+        ttwid = getattr(self, "_ttwid_cache", None)
+        if ttwid is None:
+            ttwid = await self._get_ttwid()
+            self._ttwid_cache = ttwid or ""
+        if ttwid and "ttwid=" not in cookie:
+            cookie = (cookie + "; " if cookie else "") + f"ttwid={ttwid}"
+        return {
+            "User-Agent": WORKS_UA,
+            "Referer": "https://www.douyin.com/",
+            "Accept": "application/json, text/plain, */*",
+            "Cookie": cookie,
+        }
+
+    def _sign_params(self, params: dict) -> str:
+        """对查询串做 a_bogus 签名，返回已附加 a_bogus 的完整参数串"""
+        qs = "&".join(f"{k}={v}" for k, v in params.items())
+        ab = ABogus(user_agent=WORKS_UA)
+        return ab.generate_abogus(qs)[0]
+
+    async def get_user_info(self, user_id: str) -> UserInfo:
+        info = UserInfo(user_id=user_id)
+        if not user_id:
+            return info
+        try:
+            params = {
+                "device_platform": "webapp", "aid": "6383", "channel": "channel_pc_web",
+                "sec_user_id": user_id,
+                "publish_video_strategy_type": "2", "source": "channel_pc_web",
+                "cookie_enabled": "true", "screen_width": "1920", "screen_height": "1080",
+                "browser_language": "zh-CN", "browser_platform": "Win32",
+                "browser_name": "Chrome", "browser_version": WORKS_UA_CHROME_VER,
+                "browser_online": "true", "engine_name": "Blink",
+                "browser_version_full": WORKS_UA_CHROME_VER,
+                "os_name": "Windows", "os_version": "10", "platform": "PC",
+            }
+            url = "https://www.douyin.com/aweme/v1/web/user/profile/other/?" + self._sign_params(params)
+            resp = await self.client.get(url, headers=await self._works_headers())
+            data = resp.json()
+            if data.get("status_code") == 0:
+                user = data.get("user") or {}
+                info.nickname = user.get("nickname") or ""
+                thumb = (user.get("avatar_thumb") or {}).get("url_list") or []
+                if thumb:
+                    info.avatar_url = thumb[0]
+            else:
+                logger.warning(
+                    f"抖音用户信息接口异常: status_code={data.get('status_code')} "
+                    f"{(data.get('status_msg') or '')[:120]}"
+                )
+        except Exception as e:
+            logger.error(f"获取抖音用户信息失败 {user_id}: {e}")
+        return info
+
+    async def get_user_works(self, user_id: str, cursor: int = 0, count: int = 20):
+        """分页获取作品列表。cursor 为接口 max_cursor（时间戳语义），原样回传。"""
+        works = []
+        try:
+            params = {
+                "device_platform": "webapp", "aid": "6383", "channel": "channel_pc_web",
+                "sec_user_id": user_id,
+                "max_cursor": str(cursor),
+                "locate_query": "false", "show_live_replay_strategy": "1",
+                "need_time_list": "1", "time_list_query": "0", "whale_cut_token": "",
+                "cut_version": "1", "count": str(count),
+                "publish_video_strategy_type": "2",
+                "cookie_enabled": "true", "screen_width": "1920", "screen_height": "1080",
+                "browser_language": "zh-CN", "browser_platform": "Win32",
+                "browser_name": "Chrome", "browser_version": WORKS_UA_CHROME_VER,
+                "browser_online": "true", "engine_name": "Blink",
+                "browser_version_full": WORKS_UA_CHROME_VER,
+                "os_name": "Windows", "os_version": "10", "platform": "PC",
+            }
+            url = "https://www.douyin.com/aweme/v1/web/aweme/post/?" + self._sign_params(params)
+            resp = await self.client.get(url, headers=await self._works_headers())
+            data = resp.json()
+            if data.get("status_code") not in (0, None):
+                raise RuntimeError(
+                    f"抖音作品列表接口失败: status_code={data.get('status_code')} "
+                    f"{(data.get('status_msg') or '')[:120]}"
+                )
+            for aweme in data.get("aweme_list") or []:
+                w = self._aweme_to_work(aweme)
+                if w and w.work_id:
+                    works.append(w)
+            has_more = data.get("has_more") == 1
+            try:
+                next_cursor = int(data.get("max_cursor") or cursor)
+            except (ValueError, TypeError):
+                next_cursor = cursor
+            return works, next_cursor, has_more
+        except RuntimeError:
+            raise
+        except Exception as e:
+            logger.error(f"获取抖音作品列表失败 {user_id}: {e}")
+            raise RuntimeError(f"获取抖音作品列表失败: {e}") from e
+
+    @staticmethod
+    def _aweme_to_work(aweme: dict) -> Optional[WorkInfo]:
+        if not isinstance(aweme, dict):
+            return None
+        w = WorkInfo()
+        w.work_id = str(aweme.get("aweme_id") or "")
+        w.title = aweme.get("desc") or ""
+        w.publish_ts = int(aweme.get("create_time") or 0)
+        w.duration = (aweme.get("duration") or 0) / 1000.0
+        images = aweme.get("images")
+        if images:
+            # 图集作品：逐图取第一个镜像地址
+            w.work_type = "images"
+            w.duration = 0
+            urls = []
+            for img in images:
+                if isinstance(img, dict):
+                    lst = img.get("url_list") or []
+                    if lst:
+                        urls.append(lst[0])
+            w.download_urls = urls
+        else:
+            video = aweme.get("video") or {}
+            play = video.get("play_addr") or video.get("download_addr") or {}
+            lst = play.get("url_list") or []
+            if lst:
+                u = lst[0]
+                if isinstance(u, str) and u.startswith("/"):
+                    u = "https://www.douyin.com" + u
+                w.download_urls = [u]
+            cover = (video.get("cover") or {}).get("url_list") or []
+            if cover:
+                w.cover_url = cover[0]
+        return w

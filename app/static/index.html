@@ -28,6 +28,10 @@
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/></svg>
                 <span>录制记录</span>
             </a>
+            <a class="nav-item" data-page="works" onclick="switchPage('works')">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M2 12h20M12 4v16"/></svg>
+                <span>作品订阅</span>
+            </a>
             <a class="nav-item" data-page="files" onclick="switchPage('files')">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
                 <span>文件管理</span>
@@ -200,6 +204,76 @@
             </div>
         </div>
 
+        <!-- 作品订阅 -->
+        <div id="page-works" class="page">
+            <header class="page-header">
+                <h1>作品订阅</h1>
+                <div class="page-header-actions">
+                    <button class="btn btn-primary" onclick="showAddCreatorModal()">+ 添加创作者</button>
+                </div>
+            </header>
+            <div class="card">
+                <div class="card-header"><h2>订阅的创作者</h2></div>
+                <div class="card-body">
+                    <table class="data-table" id="creatorsTable">
+                        <thead>
+                            <tr>
+                                <th>平台</th>
+                                <th>昵称</th>
+                                <th>作品数</th>
+                                <th>已下载</th>
+                                <th>待下载/失败</th>
+                                <th>累计大小</th>
+                                <th>最新作品</th>
+                                <th>最后检查</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="creatorsTableBody">
+                            <tr><td colspan="9" class="empty-state">加载中...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="card" style="margin-top:16px">
+                <div class="card-header">
+                    <h2>作品列表</h2>
+                    <div class="file-toolbar">
+                        <select id="worksCreatorFilter" class="select" onchange="loadWorksTable()">
+                            <option value="">全部创作者</option>
+                        </select>
+                        <select id="worksStatusFilter" class="select" onchange="loadWorksTable()">
+                            <option value="">全部状态</option>
+                            <option value="completed">已完成</option>
+                            <option value="pending">待下载</option>
+                            <option value="downloading">下载中</option>
+                            <option value="failed">失败</option>
+                        </select>
+                        <button class="btn btn-secondary" onclick="loadWorksTable()">刷新</button>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <table class="data-table" id="worksTable">
+                        <thead>
+                            <tr>
+                                <th>平台</th>
+                                <th>创作者</th>
+                                <th>标题</th>
+                                <th>类型</th>
+                                <th>发布时间</th>
+                                <th>大小</th>
+                                <th>状态</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="worksTableBody">
+                            <tr><td colspan="8" class="empty-state">加载中...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
         <!-- 文件管理 -->
         <div id="page-files" class="page">
             <header class="page-header">
@@ -284,6 +358,23 @@
                         <div class="form-group">
                             <label>磁盘用量上限（%）</label>
                             <input id="set_max_disk_usage" class="input" type="number" min="1" max="100" placeholder="90" />
+                        </div>
+                        <div class="form-group">
+                            <label>作品检测间隔（秒）</label>
+                            <input id="set_works_poll_interval" class="input" type="number" min="30" placeholder="600" />
+                            <div class="form-hint">作品订阅检查创作者新作品的频率，默认 600（10 分钟）</div>
+                        </div>
+                        <div class="form-group">
+                            <label>作品自动下载</label>
+                            <label class="checkbox-label">
+                                <input id="set_works_auto_download" type="checkbox" /> 检测到新作品后自动下载
+                            </label>
+                            <div class="form-hint">关闭时仅记录新作品，可在作品订阅页手动点下载</div>
+                        </div>
+                        <div class="form-group">
+                            <label>回填条数上限</label>
+                            <input id="set_works_backfill_limit" class="input" type="number" min="0" placeholder="0" />
+                            <div class="form-hint">首次添加创作者回填的历史作品条数上限，0 = 不限制（回填全部）</div>
                         </div>
                     </div>
                 </div>
@@ -445,6 +536,34 @@
         <div class="modal-footer">
             <button class="btn btn-secondary" onclick="hideEditRoomModal()">取消</button>
             <button class="btn btn-primary" onclick="submitEditRoom()">保存</button>
+        </div>
+    </div>
+</div>
+
+<!-- 添加创作者弹窗 -->
+<div class="modal-overlay" id="addCreatorModal" style="display:none">
+    <div class="modal">
+        <div class="modal-header">
+            <h2>添加创作者（作品订阅）</h2>
+            <button class="btn-close" onclick="hideAddCreatorModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div class="form-group">
+                <label>创作者主页链接</label>
+                <input type="text" id="creatorUrl" class="input" placeholder="https://www.douyin.com/user/MS4wLjABAAAA..." oninput="detectCreatorPlatform()">
+                <div class="form-hint" id="creatorPlatformHint">
+                    抖音: douyin.com/user/MS4w... · B站: space.bilibili.com/数字 · 快手: kuaishou.com/profile/xxx
+                </div>
+            </div>
+            <div class="form-group">
+                <label>备注 (可选)</label>
+                <input type="text" id="creatorRemark" class="input" placeholder="给这个创作者加个备注">
+            </div>
+            <div class="form-hint">添加后自动<b>全量回填历史作品</b>并开始下载，之后每 10 分钟检测新作品（可在系统设置调整）</div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="hideAddCreatorModal()">取消</button>
+            <button class="btn btn-primary" onclick="submitAddCreator()">添加</button>
         </div>
     </div>
 </div>

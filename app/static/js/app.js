@@ -24,6 +24,7 @@ function switchPage(page) {
     if (page === 'dashboard') refreshDashboard();
     else if (page === 'rooms') loadRooms();
     else if (page === 'recordings') loadRecordings();
+    else if (page === 'works') { loadCreators(); loadWorksTable(); }
     else if (page === 'files') loadFiles();
     else if (page === 'settings') loadSettings();
 }
@@ -488,6 +489,185 @@ async function mergeSelected() {
     }
 }
 
+// 作品订阅
+async function loadCreators() {
+    try {
+        const creators = await API.get('/api/works/creators');
+        const tbody = document.getElementById('creatorsTableBody');
+
+        // 同步创作者过滤下拉
+        const filter = document.getElementById('worksCreatorFilter');
+        if (filter) {
+            const cur = filter.value;
+            filter.innerHTML = '<option value="">全部创作者</option>' + creators.map(c =>
+                `<option value="${c.id}">${escapeHtml(c.nickname || c.platform_user_id)}</option>`
+            ).join('');
+            filter.value = cur;
+        }
+
+        if (creators.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="9" class="empty-state">还没有订阅创作者，点击右上角"添加创作者"</td></tr>';
+            return;
+        }
+
+        tbody.innerHTML = creators.map(c => `
+            <tr>
+                <td><span class="platform-tag">${escapeHtml(c.platform_name)}</span></td>
+                <td>${escapeHtml(c.nickname || '-')}${c.backfill_done ? '' : ' <span class="status-badge status-recording">回填中</span>'}</td>
+                <td>${c.work_total}</td>
+                <td>${c.completed_count}</td>
+                <td>${c.pending_count} / ${c.failed_count}</td>
+                <td>${c.total_size_mb > 0 ? formatSize(c.total_size_mb) : '-'}</td>
+                <td>${formatTime(c.latest_publish_time)}</td>
+                <td>${formatTime(c.last_check_time)}</td>
+                <td>
+                    <div class="action-group">
+                        <button class="btn btn-sm btn-secondary" onclick="checkCreatorNow(${c.id})" title="立即检查新作品">检查</button>
+                        <button class="btn btn-sm btn-icon" onclick="toggleCreator(${c.id}, ${!c.enabled})">${c.enabled ? '禁用' : '启用'}</button>
+                        <button class="btn btn-sm btn-danger" onclick="deleteCreator(${c.id})">删除</button>
+                    </div>
+                </td>
+            </tr>
+        `).join('');
+    } catch (e) {
+        console.error('Load creators error:', e);
+    }
+}
+
+function showAddCreatorModal() {
+    document.getElementById('addCreatorModal').style.display = 'flex';
+    document.getElementById('creatorUrl').value = '';
+    document.getElementById('creatorRemark').value = '';
+    document.getElementById('creatorPlatformHint').textContent =
+        '抖音: douyin.com/user/MS4w... · B站: space.bilibili.com/数字 · 快手: kuaishou.com/profile/xxx';
+    document.getElementById('creatorUrl').focus();
+}
+
+function hideAddCreatorModal() {
+    document.getElementById('addCreatorModal').style.display = 'none';
+}
+
+function detectCreatorPlatform() {
+    const url = document.getElementById('creatorUrl').value;
+    const hint = document.getElementById('creatorPlatformHint');
+    if (url.includes('douyin.com/user/')) hint.textContent = '检测到: 抖音主页';
+    else if (url.includes('space.bilibili.com/')) hint.textContent = '检测到: B站空间';
+    else if (url.includes('kuaishou.com/profile/')) hint.textContent = '检测到: 快手主页';
+    else hint.textContent = '抖音: douyin.com/user/MS4w... · B站: space.bilibili.com/数字 · 快手: kuaishou.com/profile/xxx';
+}
+
+async function submitAddCreator() {
+    const home_url = document.getElementById('creatorUrl').value.trim();
+    if (!home_url) { showToast('请输入创作者主页链接', 'error'); return; }
+    const remark = document.getElementById('creatorRemark').value.trim();
+
+    try {
+        const result = await API.post('/api/works/creators', { home_url, remark: remark || null, enabled: true });
+        if (result.message) {
+            showToast(result.message, 'success');
+            hideAddCreatorModal();
+            loadCreators();
+        } else if (result.detail) {
+            showToast(result.detail, 'error');
+        }
+    } catch (e) {
+        showToast('添加失败', 'error');
+    }
+}
+
+async function checkCreatorNow(id) {
+    try {
+        await API.post(`/api/works/creators/${id}/check`, {});
+        showToast('正在检查新作品...', 'info');
+        setTimeout(() => { loadCreators(); loadWorksTable(); }, 5000);
+    } catch (e) { showToast('检查失败', 'error'); }
+}
+
+async function toggleCreator(id, enabled) {
+    try {
+        await API.put(`/api/works/creators/${id}`, { enabled });
+        showToast(enabled ? '已启用' : '已禁用', 'success');
+        loadCreators();
+    } catch (e) { showToast('操作失败', 'error'); }
+}
+
+async function deleteCreator(id) {
+    if (!confirm('确认删除该创作者订阅？作品记录会一并删除（已下载的文件保留在磁盘）。')) return;
+    try {
+        await API.delete(`/api/works/creators/${id}`);
+        showToast('删除成功', 'success');
+        loadCreators();
+        loadWorksTable();
+    } catch (e) { showToast('删除失败', 'error'); }
+}
+
+async function loadWorksTable() {
+    try {
+        const creatorId = document.getElementById('worksCreatorFilter')?.value || '';
+        const status = document.getElementById('worksStatusFilter')?.value || '';
+        let url = '/api/works?limit=200';
+        if (creatorId) url += `&creator_id=${creatorId}`;
+        if (status) url += `&status=${status}`;
+        const works = await API.get(url);
+        const tbody = document.getElementById('worksTableBody');
+
+        if (works.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="8" class="empty-state">暂无作品记录</td></tr>';
+            return;
+        }
+
+        const STATUS = {
+            pending: ['status-offline', '待下载'],
+            downloading: ['status-recording', '下载中'],
+            completed: ['status-completed', '已完成'],
+            failed: ['status-failed', '失败'],
+        };
+        tbody.innerHTML = works.map(w => {
+            const [cls, text] = STATUS[w.status] || ['status-offline', w.status];
+            const canPlay = w.status === 'completed' && w.work_type === 'video' && w.file_path;
+            return `
+                <tr>
+                    <td><span class="platform-tag">${escapeHtml(w.platform_name)}</span></td>
+                    <td>${escapeHtml(w.nickname || '-')}</td>
+                    <td title="${escapeHtml(w.title || '')}">${w.title ? escapeHtml(w.title.length > 30 ? w.title.substring(0, 30) + '...' : w.title) : '-'}</td>
+                    <td>${w.work_type === 'images' ? '图集' : '视频'}</td>
+                    <td>${formatTime(w.publish_time)}</td>
+                    <td>${w.file_size_mb > 0 ? formatSize(w.file_size_mb) : '-'}</td>
+                    <td title="${escapeHtml(w.error_message || '')}"><span class="status-badge ${cls}">${text}</span></td>
+                    <td>
+                        <div class="action-group">
+                            ${canPlay ? `<button class="btn btn-sm btn-secondary" data-act="play-work" data-path="${escapeHtml(w.file_path)}">播放</button>` : ''}
+                            ${w.file_path ? `<a class="btn btn-sm btn-secondary" href="/api/files/download/${w.file_path.split('/').map(encodeURIComponent).join('/')}" download>下载</a>` : ''}
+                            ${w.status === 'failed' || w.status === 'completed' ? `<button class="btn btn-sm btn-secondary" onclick="retryWork(${w.id})">重新下载</button>` : ''}
+                            <button class="btn btn-sm btn-danger" onclick="deleteWork(${w.id})">删除</button>
+                        </div>
+                    </td>
+                </tr>
+            `;
+        }).join('');
+    } catch (e) {
+        console.error('Load works error:', e);
+    }
+}
+
+async function retryWork(id) {
+    try {
+        const res = await API.post(`/api/works/${id}/retry`, {});
+        showToast(res.message || '已加入下载队列', 'success');
+        setTimeout(() => { loadCreators(); loadWorksTable(); }, 3000);
+    } catch (e) { showToast('操作失败', 'error'); }
+}
+
+async function deleteWork(id) {
+    if (!confirm('确认删除该作品记录？已下载的文件也会从磁盘删除。')) return;
+    try {
+        await API.delete(`/api/works/${id}`);
+        showToast('删除成功', 'success');
+        loadCreators();
+        loadWorksTable();
+    } catch (e) { showToast('删除失败', 'error'); }
+}
+
 // 系统设置
 async function loadSettings() {
     try {
@@ -508,6 +688,9 @@ async function loadSettings() {
         setField('set_kuaishou_cookie', s.kuaishou_cookie);
         setCheck('set_enable_notification', s.enable_notification);
         setCheck('set_enable_proxy', s.enable_proxy);
+        setField('set_works_poll_interval', s.works_poll_interval);
+        setField('set_works_backfill_limit', s.works_backfill_limit);
+        setCheck('set_works_auto_download', s.works_auto_download);
 
         const platforms = await API.get('/api/system/platforms');
         document.getElementById('cfgPlatforms').innerHTML = platforms.map(p =>
@@ -570,7 +753,12 @@ async function saveSettings(e) {
         kuaishou_cookie: getField('set_kuaishou_cookie'),
         enable_notification: getCheck('set_enable_notification'),
         enable_proxy: getCheck('set_enable_proxy'),
+        works_backfill_limit: parseInt(getField('set_works_backfill_limit'), 10) || 0,
+        works_auto_download: getCheck('set_works_auto_download'),
     };
+    // 检测间隔留空则不提交（后端只更新传入字段），避免 0 被"必须为正数"校验拒绝
+    const pollInterval = parseInt(getField('set_works_poll_interval'), 10);
+    if (pollInterval > 0) payload.works_poll_interval = pollInterval;
 
     const btn = e && e.target;
     const oldLabel = btn ? btn.textContent : '';
@@ -739,6 +927,15 @@ document.addEventListener('DOMContentLoaded', () => {
             const p = btn.dataset.path || '';
             if (btn.dataset.act === 'play') playFile(p);
             else if (btn.dataset.act === 'delete') deleteFile(p);
+        });
+    }
+
+    // 作品表格播放按钮（文件位于 output_dir/works 下，复用文件播放接口）
+    const worksBody = document.getElementById('worksTableBody');
+    if (worksBody) {
+        worksBody.addEventListener('click', (e) => {
+            const btn = e.target.closest('button[data-act="play-work"]');
+            if (btn) playFile(btn.dataset.path || '');
         });
     }
 });

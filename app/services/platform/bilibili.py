@@ -1,9 +1,15 @@
 """Bilibili直播适配器"""
 import re
 import json
+import time
+import hashlib
 import logging
 from typing import Optional
-from app.services.platform.base import BasePlatform, RoomInfo, PlatformFactory
+from urllib.parse import urlencode
+from app.services.platform.base import (
+    BasePlatform, RoomInfo, PlatformFactory, UserInfo, WorkInfo,
+    WORKS_UA, WORKS_UA_CHROME_VER,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -189,3 +195,174 @@ class BilibiliPlatform(BasePlatform):
             logger.error(f"获取B站直播流地址失败: {e}")
 
         return ""
+
+    # ---------- 作品订阅 ----------
+
+    # wbi 签名混淆表（来源: SocialSisterYi/bilibili-API-collect docs/misc/sign/wbi.md）
+    _WBI_MIXIN_TAB = [
+        46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49,
+        33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40, 61,
+        26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36,
+        20, 34, 44, 52,
+    ]
+
+    @classmethod
+    def extract_user_id(cls, url: str) -> str:
+        """从主页URL提取 mid（形如 https://space.bilibili.com/123456）"""
+        m = re.search(r"space\.bilibili\.com/(\d+)", url)
+        return m.group(1) if m else ""
+
+    async def _get_wbi_keys(self):
+        """获取 wbi 签名 img/sub key（游客可用，缓存 1 小时）"""
+        cached = getattr(self, "_wbi_cache", None)
+        if cached and time.time() - cached[0] < 3600:
+            return cached[1]
+        headers = {
+            "User-Agent": WORKS_UA,
+            "Referer": "https://www.bilibili.com/",
+            "Accept": "application/json",
+        }
+        cookie = await self._ensure_guest_cookie()
+        if cookie:
+            headers["Cookie"] = cookie
+        resp = await self.client.get("https://api.bilibili.com/x/web-interface/nav", headers=headers)
+        data = resp.json()
+        wbi = (data.get("data") or {}).get("wbi_img") or {}
+        img_key = (wbi.get("img_url") or "").rsplit("/", 1)[-1].split(".")[0]
+        sub_key = (wbi.get("sub_url") or "").rsplit("/", 1)[-1].split(".")[0]
+        if not img_key or not sub_key:
+            raise RuntimeError(f"获取 wbi key 失败: code={data.get('code')}")
+        self._wbi_cache = (time.time(), (img_key, sub_key))
+        return img_key, sub_key
+
+    async def _wbi_sign(self, params: dict) -> dict:
+        """wbi 签名：参数排序拼接后 md5，附加 wts/w_rid"""
+        img_key, sub_key = await self._get_wbi_keys()
+        mixin = "".join((img_key + sub_key)[i] for i in self._WBI_MIXIN_TAB)[:32]
+        signed = {k: "".join(ch for ch in str(v) if ch not in "!'()*")
+                  for k, v in sorted({**params, "wts": int(time.time())}.items())}
+        qs = urlencode(signed)
+        signed["w_rid"] = hashlib.md5((qs + mixin).encode()).hexdigest()
+        return signed
+
+    async def _api_headers(self, referer: str = "https://www.bilibili.com/") -> dict:
+        headers = {
+            "User-Agent": WORKS_UA,
+            "Referer": referer,
+            "Accept": "application/json",
+        }
+        cookie = await self._ensure_guest_cookie()
+        if cookie:
+            headers["Cookie"] = cookie
+        return headers
+
+    async def get_user_info(self, user_id: str) -> UserInfo:
+        info = UserInfo(user_id=user_id)
+        if not user_id:
+            return info
+        try:
+            # card 接口无需 wbi 签名，游客可用
+            resp = await self.client.get(
+                "https://api.bilibili.com/x/web-interface/card",
+                params={"mid": user_id, "photo": "true"},
+                headers=await self._api_headers(),
+            )
+            data = resp.json()
+            if data.get("code") == 0:
+                card = (data.get("data") or {}).get("card") or {}
+                info.nickname = card.get("name") or ""
+                info.avatar_url = card.get("face") or ""
+            else:
+                logger.warning(f"B站用户信息接口异常: code={data.get('code')} {data.get('message', '')}")
+        except Exception as e:
+            logger.error(f"获取B站用户信息失败 {user_id}: {e}")
+        return info
+
+    async def get_user_works(self, user_id: str, cursor: int = 0, count: int = 20):
+        """分页获取投稿视频。
+
+        用 series/recArchivesByKeywords（keywords 为空即全部视频，无需 wbi/登录，
+        无 arc/search 的 -412 风控）。cursor 即页码（从 0 起，内部转为 1 起）。
+        """
+        works = []
+        page = max(int(cursor), 0) + 1
+        try:
+            resp = await self.client.get(
+                "https://api.bilibili.com/x/series/recArchivesByKeywords",
+                params={
+                    "mid": user_id,
+                    "keywords": "",
+                    "ps": str(min(max(count, 1), 100)),
+                    "pn": str(page),
+                    "orderby": "pubdate",
+                },
+                headers=await self._api_headers(f"https://space.bilibili.com/{user_id}/video"),
+            )
+            data = resp.json()
+            if data.get("code") != 0:
+                raise RuntimeError(
+                    f"B站作品列表接口失败: code={data.get('code')} {data.get('message', '')}"
+                )
+            archives = (data.get("data") or {}).get("archives") or []
+            for item in archives:
+                w = WorkInfo()
+                w.work_id = item.get("bvid") or ""
+                w.title = item.get("title") or ""
+                w.publish_ts = int(item.get("pubdate") or item.get("ctime") or 0)
+                w.duration = float(item.get("duration") or 0)
+                w.cover_url = item.get("pic") or ""
+                if w.work_id:
+                    works.append(w)
+            has_more = len(archives) >= min(max(count, 1), 100)
+            return works, page, has_more
+        except RuntimeError:
+            raise
+        except Exception as e:
+            logger.error(f"获取B站作品列表失败 {user_id}: {e}")
+            raise RuntimeError(f"获取B站作品列表失败: {e}") from e
+
+    async def get_download_urls(self, work: WorkInfo) -> list:
+        """解析投稿视频直链（列表接口不含地址，下载时二次解析）。
+
+        游客态 platform=html5 + fnval=0 拿渐进式 MP4（清晰度受限但可直接下载）；
+        配置了 bilibili_cookie 时可用更高 qn。
+        """
+        if work.download_urls:
+            return work.download_urls
+        if not work.work_id:
+            return []
+        try:
+            headers = await self._api_headers()
+            view = await self.client.get(
+                "https://api.bilibili.com/x/web-interface/view",
+                params={"bvid": work.work_id},
+                headers=headers,
+            )
+            vdata = view.json()
+            if vdata.get("code") != 0:
+                logger.warning(f"B站视频信息获取失败 {work.work_id}: {vdata.get('message', '')}")
+                return []
+            v = vdata.get("data") or {}
+            aid, cid = v.get("aid"), v.get("cid")
+            if not aid or not cid:
+                return []
+
+            signed = await self._wbi_sign({
+                "avid": str(aid), "cid": str(cid), "qn": "64",
+                "fnval": "0", "fnver": "0",
+                "platform": "html5", "high_quality": "1",
+            })
+            play = await self.client.get(
+                "https://api.bilibili.com/x/player/wbi/playurl",
+                params=signed,
+                headers=headers,
+            )
+            pdata = play.json()
+            if pdata.get("code") != 0:
+                logger.warning(f"B站播放地址获取失败 {work.work_id}: {pdata.get('message', '')}")
+                return []
+            durl = (pdata.get("data") or {}).get("durl") or []
+            return [d["url"] for d in durl if isinstance(d, dict) and d.get("url")]
+        except Exception as e:
+            logger.error(f"解析B站下载地址失败 {work.work_id}: {e}")
+            return []

@@ -1,6 +1,6 @@
 """数据库模型定义"""
 from datetime import datetime, timezone
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, Float, ForeignKey
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, Float, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, relationship
 
 
@@ -60,3 +60,51 @@ class SystemLog(Base):
     module = Column(String(50), nullable=True, comment="模块")
     message = Column(Text, nullable=False, comment="日志内容")
     created_at = Column(DateTime, default=datetime.now(timezone.utc).replace(tzinfo=None), comment="创建时间")
+
+
+class Creator(Base):
+    """作品订阅创作者（主播/UP主的非直播作品）"""
+    __tablename__ = "creators"
+    __table_args__ = (
+        UniqueConstraint("platform", "platform_user_id", name="uq_creator_platform_uid"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    platform = Column(String(50), nullable=False, comment="平台: douyin/bilibili/kuaishou")
+    platform_user_id = Column(String(150), nullable=False, comment="平台用户ID(sec_uid/mid/eid)")
+    nickname = Column(String(200), nullable=True, comment="昵称")
+    avatar_url = Column(String(500), nullable=True, comment="头像")
+    home_url = Column(String(500), nullable=False, comment="主页地址")
+    enabled = Column(Boolean, default=True, comment="是否启用监控")
+    backfill_done = Column(Boolean, default=False, comment="历史作品是否已全部回填")
+    last_check_time = Column(DateTime, nullable=True, comment="最后检查时间")
+    last_work_time = Column(DateTime, nullable=True, comment="最新作品发布时间")
+    remark = Column(String(200), nullable=True, comment="备注")
+    created_at = Column(DateTime, default=datetime.now(timezone.utc).replace(tzinfo=None), comment="创建时间")
+
+    works = relationship("Work", back_populates="creator", cascade="all, delete-orphan")
+
+
+class Work(Base):
+    """创作者作品（视频/图集）"""
+    __tablename__ = "works"
+    __table_args__ = (
+        UniqueConstraint("creator_id", "platform_work_id", name="uq_work_creator_wid"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    creator_id = Column(Integer, ForeignKey("creators.id"), nullable=False, comment="创作者ID")
+    platform_work_id = Column(String(150), nullable=False, comment="平台作品ID(aweme_id/bvid/photo_id)")
+    work_type = Column(String(20), default="video", comment="类型: video/images")
+    title = Column(String(500), nullable=True, comment="标题/描述")
+    publish_time = Column(DateTime, nullable=True, comment="发布时间")
+    duration = Column(Float, default=0, comment="时长(秒)，图集为0")
+    file_path = Column(String(600), nullable=True, comment="下载文件相对路径")
+    file_size = Column(Integer, default=0, comment="文件大小(字节)")
+    download_urls = Column(Text, nullable=True, comment="下载地址JSON列表（列表接口已解析的直链）")
+    status = Column(String(20), default="pending", comment="状态: pending/downloading/completed/failed")
+    error_message = Column(Text, nullable=True, comment="失败原因")
+    downloaded_at = Column(DateTime, nullable=True, comment="下载完成时间")
+    created_at = Column(DateTime, default=datetime.now(timezone.utc).replace(tzinfo=None), comment="入库时间")
+
+    creator = relationship("Creator", back_populates="works")

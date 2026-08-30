@@ -35,11 +35,16 @@ class SettingsUpdate(BaseModel):
     douyin_cookie: Optional[str] = None
     bilibili_cookie: Optional[str] = None
     kuaishou_cookie: Optional[str] = None
+    works_poll_interval: Optional[int] = None
+    works_check_count: Optional[int] = None
+    works_auto_download: Optional[bool] = None
+    works_backfill_limit: Optional[int] = None
 
 
 _VALID_FORMATS = {"ts", "flv", "mp4"}
 _INT_FIELDS = ("segment_time", "monitor_interval", "check_timeout",
-               "max_disk_usage")
+               "max_disk_usage", "works_poll_interval", "works_check_count",
+               "works_backfill_limit")
 _PROXY_RELATED = ("proxy_addr", "enable_proxy", "douyin_cookie", "bilibili_cookie", "kuaishou_cookie")
 
 
@@ -100,6 +105,10 @@ async def system_info(db: AsyncSession = Depends(get_db)):
                 "douyin_cookie": settings.douyin_cookie,
                 "bilibili_cookie": settings.bilibili_cookie,
                 "kuaishou_cookie": settings.kuaishou_cookie,
+                "works_poll_interval": settings.works_poll_interval,
+                "works_check_count": settings.works_check_count,
+                "works_auto_download": settings.works_auto_download,
+                "works_backfill_limit": settings.works_backfill_limit,
             },
         }
 
@@ -256,6 +265,10 @@ async def _apply_settings(updates: dict):
                 "douyin_cookie": settings.douyin_cookie,
                 "bilibili_cookie": settings.bilibili_cookie,
                 "kuaishou_cookie": settings.kuaishou_cookie,
+                "works_poll_interval": settings.works_poll_interval,
+                "works_check_count": settings.works_check_count,
+                "works_auto_download": settings.works_auto_download,
+                "works_backfill_limit": settings.works_backfill_limit,
             },
         }
 
@@ -283,6 +296,10 @@ async def export_settings():
             "douyin_cookie": s.douyin_cookie,
             "bilibili_cookie": s.bilibili_cookie,
             "kuaishou_cookie": s.kuaishou_cookie,
+            "works_poll_interval": s.works_poll_interval,
+            "works_check_count": s.works_check_count,
+            "works_auto_download": s.works_auto_download,
+            "works_backfill_limit": s.works_backfill_limit,
         },
     }
     body = json.dumps(data, ensure_ascii=False, indent=2)

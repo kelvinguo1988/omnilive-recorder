@@ -9,8 +9,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from app.database import init_db
 from app.config import settings
-from app.routers import rooms, recordings, system, files
+from app.routers import rooms, recordings, system, files, works
 from app.services.monitor import monitor
+from app.services.works_monitor import works_monitor
 
 # 日志配置
 logging.basicConfig(
@@ -58,12 +59,16 @@ async def lifespan(app: FastAPI):
     await monitor.start()
     logger.info("监控调度器已启动")
 
+    await works_monitor.start()
+    logger.info("作品订阅监控已启动")
+
     logger.info("平台启动完成，等待请求...")
 
     yield
 
     # 关闭
     logger.info("正在关闭...")
+    await works_monitor.stop()
     await monitor.stop()
     logger.info("平台已关闭")
 
@@ -101,6 +106,7 @@ app.include_router(rooms.router)
 app.include_router(recordings.router)
 app.include_router(system.router)
 app.include_router(files.router)
+app.include_router(works.router)
 
 # 静态文件
 static_dir = os.path.join(os.path.dirname(__file__), "static")
