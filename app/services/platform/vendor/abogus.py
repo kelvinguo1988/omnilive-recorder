@@ -25,8 +25,19 @@ Change Log  :
 import time
 import random
 
-from gmssl import sm3, func
 from typing import Union, Callable, List, Dict
+
+# 延迟/可选依赖：gmssl 仅用于抖音作品接口的 a_bogus 签名，属于非核心能力。
+# 若在模块顶层直接 import，一旦镜像内漏装该依赖会导致 douyin -> platform -> rooms
+# -> main 整条导入链失败，整个应用起不来。改为软依赖：导入失败时保持模块可导入，
+# 仅在真正调用签名算法时抛出带修复指引的明确错误（直播录制等核心功能不受影响）。
+try:
+    from gmssl import sm3, func
+    GMSSL_AVAILABLE = True
+except ImportError:  # pragma: no cover - 仅当环境缺依赖时触发
+    sm3 = None
+    func = None
+    GMSSL_AVAILABLE = False
 
 
 class StringProcessor:
@@ -283,7 +294,16 @@ class CryptoUtility:
 
         Returns:
             List[int]: 哈希值的整数数组 (Array of integers representing the hash value).
+
+        Raises:
+            RuntimeError: 环境缺少 gmssl 依赖时抛出（附修复指引）。
         """
+        if sm3 is None or func is None:
+            raise RuntimeError(
+                "缺少 gmssl 依赖，无法生成 a_bogus 签名（仅影响抖音作品订阅，不影响直播录制）。"
+                "请在容器内执行 pip install 'gmssl==3.2.2'，或重建镜像以安装 requirements.lock 中的依赖。"
+            )
+
         # 如果输入是字符串，则将其编码为字节数组
         if isinstance(input_data, str):
             input_data_bytes = input_data.encode("utf-8")

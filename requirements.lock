@@ -23,6 +23,8 @@ click==8.4.2
     # via uvicorn
 fastapi==0.115.6
     # via -r /Users/sec-t/Downloads/直播录制/live-recorder/requirements.txt
+gmssl==3.2.2
+    # via -r /Users/sec-t/Downloads/直播录制/live-recorder/requirements.txt
 h11==0.16.0
     # via
     #   httpcore
@@ -39,6 +41,8 @@ idna==3.19
     #   httpx
 psutil==6.1.1
     # via -r /Users/sec-t/Downloads/直播录制/live-recorder/requirements.txt
+pycryptodomex==3.23.0
+    # via gmssl
 pydantic==2.10.4
     # via
     #   -r /Users/sec-t/Downloads/直播录制/live-recorder/requirements.txt

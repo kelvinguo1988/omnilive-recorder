@@ -20,14 +20,20 @@ RUN sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sou
 WORKDIR /app
 
 # 复制依赖文件并安装（本地构建传 PIP_INDEX=https://mirrors.aliyun.com/pypi/simple/）
-# P2-7: 优先使用 pip-compile 生成的 requirements.lock（锁定传递依赖，提升复现性），
-# 不存在时回退到 requirements.txt。
+# P2-7: 先用 pip-compile 生成的 requirements.lock 锁定传递依赖（提升复现性），
+# 再装一遍 requirements.txt 补齐 lock 中可能遗漏的直接依赖。
+#
+# 背景：曾出现 lock 漏掉 gmssl，导致「构建成功、容器启动即 ModuleNotFoundError」，
+# 属于典型的依赖清单不同步。两遍安装 + check_deps.py 显式校验，可把这类问题
+# 拦截在构建阶段（构建失败）而不是运行时（服务起不来）。
 COPY requirements.txt requirements.lock* ./
-RUN if [ -f requirements.lock ]; then \
+COPY scripts/check_deps.py ./scripts/
+RUN set -eux; \
+    if [ -f requirements.lock ]; then \
       pip install --no-cache-dir -i ${PIP_INDEX} -r requirements.lock; \
-    else \
-      pip install --no-cache-dir -i ${PIP_INDEX} -r requirements.txt; \
-    fi
+    fi; \
+    pip install --no-cache-dir -i ${PIP_INDEX} -r requirements.txt; \
+    python scripts/check_deps.py requirements.txt
 
 # 复制应用代码
 COPY app/ ./app/
