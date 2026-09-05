@@ -645,6 +645,7 @@ async function loadSettings() {
         setField('set_monitor_interval', s.monitor_interval);
         setField('set_check_timeout', s.check_timeout);
         setField('set_max_disk_usage', s.max_disk_usage);
+        setField('set_daily_merge_max_gb', s.daily_merge_max_gb);
         setField('set_output_dir', s.output_dir);
         setField('set_filename_template', s.filename_template);
         setField('set_webhook_url', s.webhook_url);
@@ -713,6 +714,7 @@ async function saveSettings(e) {
         monitor_interval: parseInt(getField('set_monitor_interval'), 10) || 0,
         check_timeout: parseInt(getField('set_check_timeout'), 10) || 0,
         max_disk_usage: parseInt(getField('set_max_disk_usage'), 10) || 0,
+        daily_merge_max_gb: parseFloat(getField('set_daily_merge_max_gb')) || 0,
         output_dir: getField('set_output_dir'),
         filename_template: getField('set_filename_template'),
         webhook_url: getField('set_webhook_url'),

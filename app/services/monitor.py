@@ -30,6 +30,10 @@ class LiveMonitor:
         self._reconnect_lock = asyncio.Lock()
         # 上次清理旧系统日志的时间戳（P1-4，按天节流）
         self._last_log_cleanup: float = 0.0
+        # 当日跨场次合并串行化（ffmpeg concat 可能持续数十秒到分钟级）
+        self._merge_lock = asyncio.Lock()
+        # 后台任务强引用：事件循环只持弱引用，不保存会被垃圾回收中断
+        self._bg_tasks: set = set()
 
     async def _get_platform(self, platform_name: str):
         """获取平台适配器实例（共享 PlatformManager，Cookie/代理变化自动重建）"""
@@ -513,6 +517,114 @@ class LiveMonitor:
 
         logger.info(f"房间 {room.id} 录制结束，最终文件: {final_path}")
         await self._notify(f"录制结束: {room.streamer_name or room.url}")
+
+        # 当日跨场次自动合并（后台执行，不阻塞监控循环）
+        fmt = recording.format or settings.record_format
+        task = asyncio.create_task(self._daily_merge(room.id, os.path.dirname(final_path), fmt))
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+
+    async def _daily_merge(self, room_id: int, dir_path: str, fmt: str):
+        """当日跨场次合并：同目录下该主播多段已完成录制合并为一个文件。
+
+        条件：≥2 个文件且总大小 ≤ daily_merge_max_gb（GB，0 关闭）。
+        ffmpeg concat 流拷贝不重编码；合并后录制记录收敛为一条（保留最早一条，
+        更新为合并产物），多余记录删除，旧分文件从磁盘移除。
+        """
+        if not settings.daily_merge_max_gb or settings.daily_merge_max_gb <= 0:
+            return
+        async with self._merge_lock:
+            try:
+                await self._daily_merge_inner(room_id, dir_path, fmt)
+            except Exception as e:
+                logger.error(f"当日合并失败 房间{room_id} {dir_path}: {e}")
+
+    async def _daily_merge_inner(self, room_id: int, dir_path: str, fmt: str):
+        async with async_session() as session:
+            rows = (await session.execute(
+                select(Recording).where(
+                    Recording.room_id == room_id,
+                    Recording.status == "completed",
+                ).order_by(Recording.started_at)
+            )).scalars().all()
+
+        day = [r for r in rows if r.file_path and os.path.dirname(r.file_path) == dir_path]
+        if len(day) < 2:
+            return
+        files = [os.path.join(settings.output_dir, r.file_path) for r in day]
+        files = [f for f in files if os.path.isfile(f)]
+        if len(files) < 2:
+            return
+
+        total = sum(os.path.getsize(f) for f in files)
+        max_bytes = settings.daily_merge_max_gb * 1024 ** 3
+        if total > max_bytes:
+            logger.info(
+                f"房间 {room_id} 当日录制共 {round(total / 1024 ** 3, 2)}GB "
+                f"超过上限 {settings.daily_merge_max_gb}GB，跳过当日合并"
+            )
+            return
+
+        # 命名取自目录结构（平台/主播/日期）：{主播名}_{YYYYMMDD}_合并.{fmt}
+        streamer_dir = os.path.basename(os.path.dirname(dir_path))
+        date_compact = os.path.basename(dir_path).replace("-", "")
+        final_name = f"{streamer_dir}_{date_compact}_合并.{fmt}"
+        final_path = os.path.join(dir_path, final_name)
+        # 隐藏临时产物（点前缀不会出现在文件列表），成功后原子改名；同名旧合并文件
+        # 作为输入之一会在改名时被安全覆盖（ffmpeg 已先完成读取）。
+        # 注意 dir_path 是相对 output_dir 的路径，磁盘操作必须转绝对路径
+        tmp_out = os.path.join(settings.output_dir, dir_path, f".merge_tmp_{date_compact}.{fmt}")
+        final_abs = os.path.join(settings.output_dir, dir_path, final_name)
+
+        merged = await asyncio.to_thread(
+            file_manager.merge_recordings,
+            [os.path.relpath(f, settings.output_dir) for f in files],
+            output_format=fmt,
+            output_path=tmp_out,
+        )
+        if not merged.get("success"):
+            logger.error(f"房间 {room_id} 当日合并失败: {merged.get('error')}")
+            try:
+                os.remove(tmp_out)
+            except OSError:
+                pass
+            return
+        os.replace(tmp_out, final_abs)
+
+        size = os.path.getsize(final_abs)
+        now = datetime.now()
+        keep = day[0]
+        duration_sum = sum(r.duration or 0 for r in day)
+        ended = max([r.ended_at for r in day if r.ended_at], default=now)
+        async with async_session() as session:
+            await session.execute(
+                update(Recording).where(Recording.id == keep.id).values(
+                    file_path=os.path.relpath(final_abs, settings.output_dir),
+                    file_name=final_name,
+                    file_size=size,
+                    duration=duration_sum,
+                    ended_at=ended,
+                    part_paths=None,
+                )
+            )
+            for r in day[1:]:
+                await session.execute(delete(Recording).where(Recording.id == r.id))
+            await session.commit()
+
+        # 删除旧分文件；合并产物本身可能也是本轮输入（当天二次合并），必须保留
+        for f in files:
+            if os.path.abspath(f) == final_abs:
+                continue
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+        file_manager._invalidate("file_list")
+        logger.info(
+            f"房间 {room_id} 当日合并完成: {final_name} "
+            f"({round(size / 1024 ** 3, 2)}GB, {len(files)} 段)"
+        )
+        await self._notify(f"当日合并完成: {streamer_dir} {final_name}")
 
     async def _stop_recording(self, room: Room, update_status: bool = True):
         """停止录制（向下兼容 router 调用）：最终化当前场次。"""

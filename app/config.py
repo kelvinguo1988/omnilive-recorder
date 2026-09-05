@@ -25,6 +25,11 @@ class AppConfig(BaseSettings):
     # 避免「录几分钟就断」与重连空白。设为 0 关闭主动刷新（仅依赖断流重连）。
     stream_url_refresh_interval: int = 90
 
+    # 当日自动合并：主播下播最终化后，把当天同一目录下该主播的多段录制
+    # （多次开播/下播产生的多个文件）合并为一个视频，条件是总大小不超过
+    # daily_merge_max_gb（GB）；设为 0 关闭。合并使用 ffmpeg concat 流拷贝，不重编码。
+    daily_merge_max_gb: float = 5.0
+
     # NAS 同步：把已完成的直播录制/作品按主播归拢复制到 sync_root（QNAP 等挂载目录）。
     # sync_interval 为轮询间隔（秒），0 关闭；主播可在编辑里配置 sync_path 自定义子路径。
     sync_enabled: bool = False
@@ -94,6 +99,7 @@ def _get_mapping():
         "monitor_interval": int,
         "check_timeout": int,
         "stream_url_refresh_interval": int,
+        "daily_merge_max_gb": float,
         "sync_enabled": lambda x: x.lower() == "true",
         "sync_root": str,
         "sync_interval": int,
@@ -188,6 +194,7 @@ def save_config(config: AppConfig = None) -> bool:
     section["monitor_interval"] = str(config.monitor_interval)
     section["check_timeout"] = str(config.check_timeout)
     section["stream_url_refresh_interval"] = str(config.stream_url_refresh_interval)
+    section["daily_merge_max_gb"] = str(config.daily_merge_max_gb)
     section["sync_enabled"] = b(config.sync_enabled)
     section["sync_root"] = str(config.sync_root)
     section["sync_interval"] = str(config.sync_interval)

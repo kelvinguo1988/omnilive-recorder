@@ -40,6 +40,7 @@ class SettingsUpdate(BaseModel):
     works_check_count: Optional[int] = None
     works_auto_download: Optional[bool] = None
     works_backfill_limit: Optional[int] = None
+    daily_merge_max_gb: Optional[float] = None
     sync_enabled: Optional[bool] = None
     sync_root: Optional[str] = None
     sync_interval: Optional[int] = None
@@ -113,6 +114,7 @@ async def system_info(db: AsyncSession = Depends(get_db)):
                 "works_check_count": settings.works_check_count,
                 "works_auto_download": settings.works_auto_download,
                 "works_backfill_limit": settings.works_backfill_limit,
+                "daily_merge_max_gb": settings.daily_merge_max_gb,
                 "sync_enabled": settings.sync_enabled,
                 "sync_root": settings.sync_root,
                 "sync_interval": settings.sync_interval,
@@ -229,6 +231,16 @@ async def _apply_settings(updates: dict):
                 raise HTTPException(status_code=400, detail=f"{field} 必须为正数")
             updates[field] = val
 
+    # 浮点字段校验
+    if "daily_merge_max_gb" in updates:
+        try:
+            val = float(updates["daily_merge_max_gb"])
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="daily_merge_max_gb 必须为数字")
+        if val < 0:
+            raise HTTPException(status_code=400, detail="daily_merge_max_gb 不能为负")
+        updates["daily_merge_max_gb"] = val
+
     # 应用：更新全局 settings 实例（后续录制/监控自动读取新值）
     proxy_related_changed = False
     for key, value in updates.items():
@@ -276,6 +288,7 @@ async def _apply_settings(updates: dict):
                 "works_check_count": settings.works_check_count,
                 "works_auto_download": settings.works_auto_download,
                 "works_backfill_limit": settings.works_backfill_limit,
+                "daily_merge_max_gb": settings.daily_merge_max_gb,
                 "sync_enabled": settings.sync_enabled,
                 "sync_root": settings.sync_root,
                 "sync_interval": settings.sync_interval,
@@ -321,6 +334,7 @@ async def export_settings():
             "works_check_count": s.works_check_count,
             "works_auto_download": s.works_auto_download,
             "works_backfill_limit": s.works_backfill_limit,
+            "daily_merge_max_gb": s.daily_merge_max_gb,
             "sync_enabled": s.sync_enabled,
             "sync_root": s.sync_root,
             "sync_interval": s.sync_interval,

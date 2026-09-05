@@ -333,6 +333,11 @@
                             <input id="set_check_timeout" class="input" type="number" min="1" placeholder="15" />
                         </div>
                         <div class="form-group">
+                            <label>当日自动合并上限（GB）</label>
+                            <input id="set_daily_merge_max_gb" class="input" type="number" min="0" step="0.5" placeholder="5" />
+                            <div class="form-hint">同主播当天的多段录制结束后自动合并为一个文件，总大小超过此值则不合并；0 = 关闭</div>
+                        </div>
+                        <div class="form-group">
                             <label>磁盘用量上限（%）</label>
                             <input id="set_max_disk_usage" class="input" type="number" min="1" max="100" placeholder="90" />
                         </div>
