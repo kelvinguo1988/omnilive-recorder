@@ -26,7 +26,6 @@ class Room(Base):
     home_url = Column(String(500), nullable=True, comment="主播主页地址(空=未配置作品订阅)")
     platform_user_id = Column(String(150), nullable=True, comment="平台用户ID(sec_uid/mid/principal)")
     works_enabled = Column(Boolean, default=False, comment="是否启用作品订阅")
-    sync_path = Column(String(200), nullable=True, comment="NAS同步子路径(空=用主播名)")
     backfill_done = Column(Boolean, default=False, comment="历史作品是否已全部回填")
     last_work_check_time = Column(DateTime, nullable=True, comment="最后作品检查时间")
     title = Column(String(200), nullable=True, comment="直播标题")

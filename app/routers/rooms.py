@@ -23,7 +23,6 @@ class RoomCreate(BaseModel):
     quality: str = "origin"
     enabled: bool = True
     works_enabled: bool = False
-    sync_path: Optional[str] = None
     remark: Optional[str] = None
     streamer_name: Optional[str] = None
 
@@ -35,7 +34,6 @@ class RoomUpdate(BaseModel):
     quality: Optional[str] = None
     enabled: Optional[bool] = None
     works_enabled: Optional[bool] = None
-    sync_path: Optional[str] = None
     remark: Optional[str] = None
     streamer_name: Optional[str] = None
 
@@ -48,7 +46,6 @@ class RoomImportItem(BaseModel):
     quality: Optional[str] = "origin"
     enabled: Optional[bool] = True
     works_enabled: Optional[bool] = False
-    sync_path: Optional[str] = None
     remark: Optional[str] = None
     streamer_name: Optional[str] = None
 
@@ -105,7 +102,6 @@ async def list_rooms(db: AsyncSession = Depends(get_db)):
             "enabled": r.enabled,
             "works_enabled": bool(r.works_enabled),
             "backfill_done": bool(r.backfill_done),
-            "sync_path": r.sync_path,
             "is_live": r.is_live,
             "is_recording": r.is_recording,
             "last_check_time": r.last_check_time.isoformat() if r.last_check_time else None,
@@ -164,7 +160,6 @@ async def create_room(room: RoomCreate, background_tasks: BackgroundTasks, db: A
         quality=room.quality,
         enabled=room.enabled,
         works_enabled=room.works_enabled and bool(platform_user_id),
-        sync_path=(room.sync_path or "").strip() or None,
         remark=room.remark,
         streamer_name=room.streamer_name,
     )
@@ -210,7 +205,6 @@ async def export_rooms(db: AsyncSession = Depends(get_db)):
                 "quality": r.quality,
                 "enabled": r.enabled,
                 "works_enabled": bool(r.works_enabled),
-                "sync_path": r.sync_path or "",
                 "remark": r.remark,
                 "streamer_name": r.streamer_name or "",
             }
@@ -274,7 +268,6 @@ async def import_rooms(payload: RoomsImport, db: AsyncSession = Depends(get_db))
                 quality=item.quality or "origin",
                 enabled=bool(item.enabled) if item.enabled is not None else True,
                 works_enabled=bool(item.works_enabled) and bool(platform_user_id),
-                sync_path=(item.sync_path or "").strip() or None,
                 remark=item.remark,
                 streamer_name=item.streamer_name or None,
             ))
@@ -308,7 +301,7 @@ async def update_room(room_id: int, room: RoomUpdate, background_tasks: Backgrou
         raise HTTPException(status_code=404, detail="主播不存在")
 
     # 文本字段统一去首尾空白，避免存入不可见的空白导致"看起来空实则非空"
-    for field in ("url", "home_url", "quality", "remark", "streamer_name", "sync_path"):
+    for field in ("url", "home_url", "quality", "remark", "streamer_name"):
         if field in update_data and isinstance(update_data[field], str):
             update_data[field] = update_data[field].strip()
 

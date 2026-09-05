@@ -392,7 +392,7 @@
                             <label class="checkbox-label">
                                 <input id="set_sync_enabled" type="checkbox" /> 启用定期同步
                             </label>
-                            <div class="form-hint">把已完成的直播录制与作品按主播归拢复制到同步根目录（录制中的文件不会同步）</div>
+                            <div class="form-hint">定时把已完成的直播录制与作品按主播归拢同步过去；录制中的文件不会同步，写完后下轮自动同步</div>
                         </div>
                         <div class="form-group">
                             <label>同步间隔（秒）</label>
@@ -406,7 +406,7 @@
                         <div class="form-hint">
                             QNAP：先在 File Station 建共享文件夹，再在 Container Station 给本容器追加卷挂载，
                             如宿主机 <code>/share/CACHEDEV1_DATA/录制备份</code> 挂到容器 <code>/mnt/qnap-recordings</code>，此处填容器路径。<br/>
-                            目标布局：<code>{根目录}/{主播同步路径}/直播|作品/文件</code>，主播的同步路径在「主播管理 → 编辑」里配置（默认用主播名）。
+                            同步后自动按主播生成文件夹：<code>{此目录}/{主播名}/直播/</code> 与 <code>{主播名}/作品/</code>，无需逐个配置。
                         </div>
                     </div>
                 </div>
@@ -508,10 +508,6 @@
                 </label>
             </div>
             <div class="form-group">
-                <label>NAS 同步路径 (可选)</label>
-                <input type="text" id="roomSyncPath" class="input" placeholder="默认用主播名；可填多级如 综艺/主播A">
-            </div>
-            <div class="form-group">
                 <label>备注 (可选)</label>
                 <input type="text" id="roomRemark" class="input" placeholder="给这个主播加个备注">
             </div>
@@ -559,11 +555,6 @@
                 <label>主播名 (可选)</label>
                 <input type="text" id="editRoomStreamerName" class="input" placeholder="用于录制文件名/目录；留空则自动探测">
                 <div class="form-hint">手动填写后即使平台探测不到，文件也会按主播名命名；清空则按 探测 &gt; 备注 &gt; 房间号 自动命名</div>
-            </div>
-            <div class="form-group">
-                <label>NAS 同步路径 (可选)</label>
-                <input type="text" id="editRoomSyncPath" class="input" placeholder="默认用主播名；可填多级如 综艺/主播A">
-                <div class="form-hint">仅在系统设置启用 NAS 同步后生效</div>
             </div>
             <div class="form-group">
                 <label>备注 (可选)</label>

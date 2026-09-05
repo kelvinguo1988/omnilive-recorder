@@ -48,7 +48,6 @@ async def init_db():
                 ("works_enabled", "BOOLEAN DEFAULT 0"),
                 ("backfill_done", "BOOLEAN DEFAULT 0"),
                 ("last_work_check_time", "DATETIME"),
-                ("sync_path", "VARCHAR(200)"),
             ]:
                 if col not in room_cols:
                     sync_conn.execute(text(f"ALTER TABLE rooms ADD COLUMN {col} {ddl}"))

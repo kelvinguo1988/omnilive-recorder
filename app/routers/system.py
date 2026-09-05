@@ -288,7 +288,7 @@ async def run_sync_now():
     """立即执行一次 NAS 同步"""
     if not settings.sync_root:
         raise HTTPException(status_code=400, detail="请先在设置中配置同步根目录")
-    stats = await sync_service.sync_all()
+    stats = await sync_service.sync_now()
     if stats.get("error"):
         raise HTTPException(status_code=400, detail=stats["error"])
     return {"message": f"同步完成：新复制 {stats['copied']}，跳过 {stats['skipped']}，失败 {stats['failed']}", **stats}

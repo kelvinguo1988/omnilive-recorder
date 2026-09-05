@@ -210,7 +210,6 @@ function showAddRoomModal() {
     document.getElementById('roomHomeUrl').value = '';
     document.getElementById('roomStreamerName').value = '';
     document.getElementById('roomRemark').value = '';
-    document.getElementById('roomSyncPath').value = '';
     document.getElementById('roomWorksEnabled').checked = false;
     document.getElementById('platformHint').textContent = '直播间与主页地址至少填一个';
     document.getElementById('roomUrl').focus();
@@ -248,13 +247,11 @@ async function submitAddRoom() {
     const remark = document.getElementById('roomRemark').value.trim();
     const streamer_name = document.getElementById('roomStreamerName').value.trim();
     const works_enabled = document.getElementById('roomWorksEnabled').checked;
-    const sync_path = document.getElementById('roomSyncPath').value.trim();
 
     try {
         const result = await API.post('/api/rooms', {
             url: url || null, home_url: home_url || null, quality, remark,
             streamer_name: streamer_name || null, works_enabled, enabled: true,
-            sync_path: sync_path || null,
         });
         if (result.message) {
             showToast(result.message, 'success');
@@ -283,7 +280,6 @@ async function showEditRoomModal(id) {
         document.getElementById('editRoomQuality').value = room.quality || 'origin';
         document.getElementById('editRoomStreamerName').value = room.streamer_name || '';
         document.getElementById('editRoomRemark').value = room.remark || '';
-        document.getElementById('editRoomSyncPath').value = room.sync_path || '';
         document.getElementById('editRoomWorksEnabled').checked = !!room.works_enabled;
         document.getElementById('editRoomModal').style.display = 'flex';
     } catch (e) {
@@ -307,7 +303,6 @@ async function submitEditRoom() {
     const streamer_name = document.getElementById('editRoomStreamerName').value.trim();
     const remark = document.getElementById('editRoomRemark').value.trim();
     const works_enabled = document.getElementById('editRoomWorksEnabled').checked;
-    const sync_path = document.getElementById('editRoomSyncPath').value.trim();
 
     // 只提交有变化的字段；地址未变时不传，避免触发平台缓存重建
     const payload = {};
@@ -317,7 +312,6 @@ async function submitEditRoom() {
     if (streamer_name !== (editingRoom.streamer_name || '')) payload.streamer_name = streamer_name;
     if (remark !== (editingRoom.remark || '')) payload.remark = remark;
     if (works_enabled !== !!editingRoom.works_enabled) payload.works_enabled = works_enabled;
-    if (sync_path !== (editingRoom.sync_path || '')) payload.sync_path = sync_path;
 
     if (Object.keys(payload).length === 0) {
         showToast('没有修改任何内容', 'info');
