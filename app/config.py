@@ -25,6 +25,12 @@ class AppConfig(BaseSettings):
     # 避免「录几分钟就断」与重连空白。设为 0 关闭主动刷新（仅依赖断流重连）。
     stream_url_refresh_interval: int = 90
 
+    # NAS 同步：把已完成的直播录制/作品按主播归拢复制到 sync_root（QNAP 等挂载目录）。
+    # sync_interval 为轮询间隔（秒），0 关闭；主播可在编辑里配置 sync_path 自定义子路径。
+    sync_enabled: bool = False
+    sync_root: str = ""
+    sync_interval: int = 3600
+
     # 作品订阅：新作品检测轮询间隔（秒）与每次拉取条数。
     # works_auto_download 关闭时仅入库不下载；works_backfill_limit 限制单个创作者
     # 首次添加时的全量回填条数（0=不限制，回填全部历史作品）。
@@ -88,6 +94,9 @@ def _get_mapping():
         "monitor_interval": int,
         "check_timeout": int,
         "stream_url_refresh_interval": int,
+        "sync_enabled": lambda x: x.lower() == "true",
+        "sync_root": str,
+        "sync_interval": int,
         "works_poll_interval": int,
         "works_check_count": int,
         "works_auto_download": lambda x: x.lower() == "true",
@@ -179,6 +188,9 @@ def save_config(config: AppConfig = None) -> bool:
     section["monitor_interval"] = str(config.monitor_interval)
     section["check_timeout"] = str(config.check_timeout)
     section["stream_url_refresh_interval"] = str(config.stream_url_refresh_interval)
+    section["sync_enabled"] = b(config.sync_enabled)
+    section["sync_root"] = str(config.sync_root)
+    section["sync_interval"] = str(config.sync_interval)
     section["works_poll_interval"] = str(config.works_poll_interval)
     section["works_check_count"] = str(config.works_check_count)
     section["works_auto_download"] = b(config.works_auto_download)

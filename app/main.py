@@ -12,6 +12,7 @@ from app.config import settings
 from app.routers import rooms, recordings, system, files, works
 from app.services.monitor import monitor
 from app.services.works_monitor import works_monitor
+from app.services.sync_service import sync_service
 
 # 日志配置
 logging.basicConfig(
@@ -62,12 +63,16 @@ async def lifespan(app: FastAPI):
     await works_monitor.start()
     logger.info("作品订阅监控已启动")
 
+    await sync_service.start()
+    logger.info("NAS 同步服务已启动")
+
     logger.info("平台启动完成，等待请求...")
 
     yield
 
     # 关闭
     logger.info("正在关闭...")
+    await sync_service.stop()
     await works_monitor.stop()
     await monitor.stop()
     logger.info("平台已关闭")

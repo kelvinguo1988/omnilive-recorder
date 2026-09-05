@@ -14,6 +14,7 @@ from app.database import get_db
 from app.models import Room, Recording, SystemLog
 from app.services.file_manager import file_manager
 from app.services.recorder import recorder
+from app.services.sync_service import sync_service
 from app.config import settings, save_config
 
 router = APIRouter(prefix="/api/system", tags=["system"])
@@ -39,12 +40,15 @@ class SettingsUpdate(BaseModel):
     works_check_count: Optional[int] = None
     works_auto_download: Optional[bool] = None
     works_backfill_limit: Optional[int] = None
+    sync_enabled: Optional[bool] = None
+    sync_root: Optional[str] = None
+    sync_interval: Optional[int] = None
 
 
 _VALID_FORMATS = {"ts", "flv", "mp4"}
 _INT_FIELDS = ("segment_time", "monitor_interval", "check_timeout",
                "max_disk_usage", "works_poll_interval", "works_check_count",
-               "works_backfill_limit")
+               "works_backfill_limit", "sync_interval")
 _PROXY_RELATED = ("proxy_addr", "enable_proxy", "douyin_cookie", "bilibili_cookie", "kuaishou_cookie")
 
 
@@ -109,6 +113,9 @@ async def system_info(db: AsyncSession = Depends(get_db)):
                 "works_check_count": settings.works_check_count,
                 "works_auto_download": settings.works_auto_download,
                 "works_backfill_limit": settings.works_backfill_limit,
+                "sync_enabled": settings.sync_enabled,
+                "sync_root": settings.sync_root,
+                "sync_interval": settings.sync_interval,
             },
         }
 
@@ -269,8 +276,22 @@ async def _apply_settings(updates: dict):
                 "works_check_count": settings.works_check_count,
                 "works_auto_download": settings.works_auto_download,
                 "works_backfill_limit": settings.works_backfill_limit,
+                "sync_enabled": settings.sync_enabled,
+                "sync_root": settings.sync_root,
+                "sync_interval": settings.sync_interval,
             },
         }
+
+
+@router.post("/sync/run")
+async def run_sync_now():
+    """立即执行一次 NAS 同步"""
+    if not settings.sync_root:
+        raise HTTPException(status_code=400, detail="请先在设置中配置同步根目录")
+    stats = await sync_service.sync_all()
+    if stats.get("error"):
+        raise HTTPException(status_code=400, detail=stats["error"])
+    return {"message": f"同步完成：新复制 {stats['copied']}，跳过 {stats['skipped']}，失败 {stats['failed']}", **stats}
 
 
 @router.get("/settings/export")
@@ -300,6 +321,9 @@ async def export_settings():
             "works_check_count": s.works_check_count,
             "works_auto_download": s.works_auto_download,
             "works_backfill_limit": s.works_backfill_limit,
+            "sync_enabled": s.sync_enabled,
+            "sync_root": s.sync_root,
+            "sync_interval": s.sync_interval,
         },
     }
     body = json.dumps(data, ensure_ascii=False, indent=2)
