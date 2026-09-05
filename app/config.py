@@ -31,7 +31,7 @@ class AppConfig(BaseSettings):
     daily_merge_max_gb: float = 5.0
 
     # NAS 同步：把已完成的直播录制/作品按主播归拢复制到 sync_root（QNAP 等挂载目录）。
-    # sync_interval 为轮询间隔（秒），0 关闭；主播可在编辑里配置 sync_path 自定义子路径。
+    # sync_interval 为轮询间隔（秒）。同步按主播名自动归拢到子文件夹，无需逐主播配置。
     sync_enabled: bool = False
     sync_root: str = ""
     sync_interval: int = 3600

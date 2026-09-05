@@ -283,6 +283,13 @@ class WorksMonitor:
 
             platform = room.platform
             async with self._download_sems[platform]:
+                # 双触发源（循环+重试端点）并发时，进信号量后重查状态，
+                # 已被另一个任务处理过（downloading/completed/failed）的跳过
+                async with async_session() as session:
+                    fresh = await session.get(Work, work.id)
+                if fresh is None or fresh.status != "pending":
+                    continue
+                work = fresh
                 # 平台级随机限速
                 gap = random.uniform(*DOWNLOAD_GAP)
                 wait = self._last_download_ts.get(platform, 0) + gap - time.time()
