@@ -23,7 +23,8 @@ class DouyinPlatform(BasePlatform):
     def match_url(cls, url: str) -> bool:
         return any(domain in url for domain in ["live.douyin.com", "douyin.com", "iesdouyin.com"])
 
-    def extract_room_id(self, url: str) -> str:
+    @classmethod
+    def extract_room_id(cls, url: str) -> str:
         patterns = [
             r"live\.douyin\.com/(\d+)",
             r"live\.douyin\.com/([a-zA-Z0-9]+)",

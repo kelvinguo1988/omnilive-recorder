@@ -553,15 +553,26 @@ async function mergeSelected() {
 
 // 作品订阅（列表页；主播的订阅入口在「主播管理」页）
 async function loadWorksPage() {
+    // 直接进入本页时主播过滤下拉可能还没填充过
+    try {
+        const filter = document.getElementById('worksCreatorFilter');
+        if (filter && filter.options.length <= 1) {
+            const rooms = await API.get('/api/rooms');
+            filter.innerHTML = '<option value="">全部主播</option>' + rooms
+                .filter(r => r.works_enabled)
+                .map(r => `<option value="${r.id}">${escapeHtml(r.streamer_name || r.platform_user_id || r.id)}</option>`)
+                .join('');
+        }
+    } catch (e) { console.error('Load streamer filter error:', e); }
     await loadWorksTable();
 }
 
 async function loadWorksTable() {
     try {
-        const creatorId = document.getElementById('worksCreatorFilter')?.value || '';
+        const roomId = document.getElementById('worksCreatorFilter')?.value || '';
         const status = document.getElementById('worksStatusFilter')?.value || '';
         let url = '/api/works?limit=200';
-        if (creatorId) url += `&creator_id=${creatorId}`;
+        if (roomId) url += `&room_id=${roomId}`;
         if (status) url += `&status=${status}`;
         const works = await API.get(url);
         const tbody = document.getElementById('worksTableBody');

@@ -328,14 +328,14 @@ async def update_room(room_id: int, room: RoomUpdate, background_tasks: Backgrou
             detected = PlatformFactory.detect_platform(new_url)
             if detected:
                 update_data["platform"] = detected
-        adapter = PlatformFactory.get_platform(update_data.get("platform") or existing.platform)
-        if adapter is None:
+        adapter_cls = PlatformFactory.get_platform_class(update_data.get("platform") or existing.platform)
+        if adapter_cls is None:
             # 退而用通用正则提取
             import re as _re
             m = _re.search(r'live\.kuaishou\.com/u/(\w+)|live\.kuaishou\.com/(\w+)|live\.douyin\.com/(\d+)|live\.bilibili\.com/(\d+)', new_url)
             update_data["room_id"] = (m.group(1) or m.group(2) or m.group(3) or m.group(4) or "") if m else ""
         else:
-            update_data["room_id"] = adapter.extract_room_id(new_url)
+            update_data["room_id"] = adapter_cls.extract_room_id(new_url)
         # 清空已缓存的平台适配器实例，下次检查按新 URL/平台重建
         # P0-2: 使用 PlatformManager.reset 先 close 旧实例再 clear，避免连接泄漏
         try:
@@ -373,6 +373,8 @@ async def delete_room(room_id: int, db: AsyncSession = Depends(get_db)):
     if room.is_recording:
         await monitor._stop_recording(room)
 
+    # 显式清理从属记录（SQLite 不强制外键，ORM 级联不作用于批量 delete）
+    await db.execute(delete(Recording).where(Recording.room_id == room_id))
     await db.execute(delete(Work).where(Work.creator_id == room_id))
     await db.execute(delete(Room).where(Room.id == room_id))
     await db.commit()

@@ -1,6 +1,5 @@
 """Bilibili直播适配器"""
 import re
-import json
 import time
 import hashlib
 import logging
@@ -34,7 +33,8 @@ class BilibiliPlatform(BasePlatform):
     def match_url(cls, url: str) -> bool:
         return any(domain in url for domain in ["live.bilibili.com", "bilibili.com"])
 
-    def extract_room_id(self, url: str) -> str:
+    @classmethod
+    def extract_room_id(cls, url: str) -> str:
         patterns = [
             r"live\.bilibili\.com/(\d+)",
             r"live\.bilibili\.com/h5/(\d+)",

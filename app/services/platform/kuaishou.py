@@ -20,7 +20,8 @@ class KuaishouPlatform(BasePlatform):
     def match_url(cls, url: str) -> bool:
         return any(domain in url for domain in ["live.kuaishou.com", "kuaishou.com", "kwai.com"])
 
-    def extract_room_id(self, url: str) -> str:
+    @classmethod
+    def extract_room_id(cls, url: str) -> str:
         patterns = [
             r"live\.kuaishou\.com/u/(\w+)",
             r"live\.kuaishou\.com/(\w+)",

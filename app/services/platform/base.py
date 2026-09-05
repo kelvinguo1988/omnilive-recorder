@@ -84,10 +84,11 @@ class BasePlatform(ABC):
         """获取直播间信息"""
         pass
 
+    @classmethod
     @abstractmethod
-    def extract_room_id(self, url: str) -> str:
-        """从URL中提取房间ID"""
-        pass
+    def extract_room_id(cls, url: str) -> str:
+        """从URL中提取房间ID（纯URL解析，免实例调用）"""
+        raise NotImplementedError
 
     @classmethod
     @abstractmethod
