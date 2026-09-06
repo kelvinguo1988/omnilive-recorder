@@ -74,6 +74,12 @@ class LiveMonitor:
                 pass
         self._refresh_task = None
 
+        # 取消当日合并等后台任务（若 ffmpeg concat 正在进行，等待其完成写入，
+        # 避免强杀留下 .merge_tmp 半成品；bg 任务自身有异常保护）
+        if self._bg_tasks:
+            await asyncio.gather(*list(self._bg_tasks), return_exceptions=True)
+            self._bg_tasks.clear()
+
         # P0-3: 优雅停止所有进行中的 ffmpeg，让 mp4 正常写 moov atom，避免文件损坏
         for room_id in list(recorder.active_processes.keys()):
             try:
