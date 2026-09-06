@@ -63,8 +63,29 @@ class WorksMonitor:
         if self._running:
             return
         self._running = True
+        await self._recover_stale_works()
         self._task = asyncio.create_task(self._loop())
         logger.info("作品订阅监控已启动")
+
+    async def _recover_stale_works(self):
+        """启动时恢复上次异常退出遗留的 downloading 作品（对标直播录制的 P0-3 修复）。
+
+        服务被强杀重启后，status=downloading 的作品已无下载进程，若不恢复
+        会永远卡在下载中。回到 pending 让队列重新拾取。
+        """
+        try:
+            async with async_session() as session:
+                res = await session.execute(
+                    update(Work).where(Work.status == "downloading").values(
+                        status="pending",
+                        error_message="服务重启恢复：下载中断，回到待下载队列",
+                    )
+                )
+                if res.rowcount:
+                    await session.commit()
+                    logger.warning(f"恢复 {res.rowcount} 条遗留 downloading 作品为待下载")
+        except Exception as e:
+            logger.error(f"恢复遗留 downloading 作品失败: {e}")
 
     async def stop(self):
         self._running = False
@@ -85,17 +106,26 @@ class WorksMonitor:
         logger.info("作品订阅监控已停止")
 
     async def _loop(self):
+        """检查与下载双循环并行：全量回填可能持续数小时（逐页防风控延迟），
+        若串行执行会让下载饥饿——回填的作品全部停在待下载。下载走平台 CDN、
+        检查走平台 API，两者各自限速互不抢占，可安全并行。"""
         # 启动后稍等，避免与直播监控/应用启动争抢
         await asyncio.sleep(5)
+        check_task = asyncio.create_task(self._check_loop())
+        download_task = asyncio.create_task(self._download_loop())
+        try:
+            await asyncio.gather(check_task, download_task)
+        finally:
+            for t in (check_task, download_task):
+                t.cancel()
+            await asyncio.gather(check_task, download_task, return_exceptions=True)
+
+    async def _check_loop(self):
         while self._running:
             try:
                 await self.check_all_rooms()
             except Exception as e:
                 logger.error(f"作品检查循环异常: {e}")
-            try:
-                await self.process_download_queue()
-            except Exception as e:
-                logger.error(f"作品下载队列异常: {e}")
             interval = settings.works_poll_interval
             # 分段 sleep，保证 stop() 能及时退出
             waited = 0.0
@@ -103,6 +133,18 @@ class WorksMonitor:
                 step = min(5.0, interval - waited)
                 await asyncio.sleep(step)
                 waited += step
+
+    async def _download_loop(self):
+        # 下载拾取间隔短（作品入库后尽快开始下载），单轮内仍有平台串行+3~7s限速
+        while self._running:
+            try:
+                await self.process_download_queue()
+            except Exception as e:
+                logger.error(f"作品下载队列异常: {e}")
+            waited = 0.0
+            while self._running and waited < 10:
+                await asyncio.sleep(2)
+                waited += 2
 
     # ---------- 检查 ----------
 
