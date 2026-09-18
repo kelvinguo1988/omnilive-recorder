@@ -71,8 +71,14 @@ class FileManager:
                 rel_path = os.path.relpath(file_path, base_path)
 
                 parts = rel_path.split(os.sep)
-                file_platform = parts[0] if len(parts) > 0 else ""
-                file_streamer = parts[1] if len(parts) > 1 else ""
+                # 作品文件路径为 works/{平台}/{主播名}/文件（顶层是 works 保留目录），
+                # 直播录制为 {平台}/{主播名}/{日期}/文件，解析时区分两种布局
+                if parts[0] == "works" and len(parts) > 3:
+                    file_platform = parts[1]
+                    file_streamer = parts[2]
+                else:
+                    file_platform = parts[0] if len(parts) > 0 else ""
+                    file_streamer = parts[1] if len(parts) > 1 else ""
 
                 stat = os.stat(file_path)
                 result.append({
@@ -163,37 +169,48 @@ class FileManager:
             return {}
 
     def get_streamers(self) -> list:
-        """获取所有主播列表"""
+        """获取所有主播列表（兼容直播与作品两种目录布局）"""
         result = []
         base_path = Path(self.output_dir)
 
         if not base_path.exists():
             return result
 
+        def _stat_streamer(platform: str, streamer_dir: Path):
+            total_size = 0
+            file_count = 0
+            for root, dirs, files in os.walk(streamer_dir):
+                for f in files:
+                    if not f.startswith("."):
+                        total_size += os.path.getsize(os.path.join(root, f))
+                        file_count += 1
+            if file_count > 0:
+                result.append({
+                    "platform": platform,
+                    "streamer": streamer_dir.name,
+                    "file_count": file_count,
+                    "total_size_mb": round(total_size / 1024 / 1024, 2),
+                    "total_size_gb": round(total_size / 1024 / 1024 / 1024, 2),
+                })
+
         for platform_dir in base_path.iterdir():
             if not platform_dir.is_dir():
                 continue
-
+            if platform_dir.name == "works":
+                # 作品布局: works/{平台}/{主播名}/文件 —— 多套一层
+                for works_platform in platform_dir.iterdir():
+                    if not works_platform.is_dir():
+                        continue
+                    for streamer_dir in works_platform.iterdir():
+                        if streamer_dir.is_dir():
+                            _stat_streamer(works_platform.name, streamer_dir)
+                continue
+            if platform_dir.name in ("merged",):
+                # 手动合并产物的历史落点目录，不按平台/主播统计
+                continue
             for streamer_dir in platform_dir.iterdir():
-                if not streamer_dir.is_dir():
-                    continue
-
-                total_size = 0
-                file_count = 0
-                for root, dirs, files in os.walk(streamer_dir):
-                    for f in files:
-                        if not f.startswith("."):
-                            total_size += os.path.getsize(os.path.join(root, f))
-                            file_count += 1
-
-                if file_count > 0:
-                    result.append({
-                        "platform": platform_dir.name,
-                        "streamer": streamer_dir.name,
-                        "file_count": file_count,
-                        "total_size_mb": round(total_size / 1024 / 1024, 2),
-                        "total_size_gb": round(total_size / 1024 / 1024 / 1024, 2),
-                    })
+                if streamer_dir.is_dir():
+                    _stat_streamer(platform_dir.name, streamer_dir)
 
         result.sort(key=lambda x: x["total_size_mb"], reverse=True)
         return result

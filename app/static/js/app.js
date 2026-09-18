@@ -168,6 +168,7 @@ async function loadRooms() {
                             ? `<button class="btn btn-sm btn-danger" onclick="stopRecording(${r.id})">停止</button>`
                             : (r.is_live ? `<button class="btn btn-sm btn-primary" onclick="startRecording(${r.id})">录制</button>` : '')}
                         ${r.works_enabled ? `<button class="btn btn-sm btn-secondary" onclick="checkWorksNow(${r.id})" title="检查新作品">查作品</button>` : ''}
+                        ${r.works_enabled ? `<button class="btn btn-sm btn-icon" onclick="refillWorks(${r.id})" title="重新全量回填历史作品(已下载的不重复)">重回填</button>` : ''}
                         <button class="btn btn-sm btn-secondary" onclick="showEditRoomModal(${r.id})" title="编辑主播信息">编辑</button>
                         <button class="btn btn-sm btn-icon" onclick="toggleRoom(${r.id}, ${!r.enabled})" title="${r.enabled ? '禁用' : '启用'}">
                             ${r.enabled ? '禁用' : '启用'}
@@ -192,6 +193,16 @@ async function toggleWorks(id, enabled) {
             showToast(enabled ? '已订阅作品，正在后台回填...' : '已取消作品订阅', enabled ? 'success' : 'info');
         }
         loadRooms();
+    } catch (e) { showToast('操作失败', 'error'); }
+}
+
+async function refillWorks(id) {
+    if (!confirm('重新全量回填该主播的历史作品？已入库/已下载的不会重复，仅补全之前缺失的（如配置 Cookie 后补全被截断的分页）。')) return;
+    try {
+        const res = await API.put(`/api/rooms/${id}`, { refill: true });
+        if (res.detail) { showToast(res.detail, 'error'); return; }
+        showToast('已开始重新回填，请稍后刷新作品列表查看进度', 'success');
+        setTimeout(() => loadRooms(), 5000);
     } catch (e) { showToast('操作失败', 'error'); }
 }
 

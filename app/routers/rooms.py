@@ -34,6 +34,7 @@ class RoomUpdate(BaseModel):
     quality: Optional[str] = None
     enabled: Optional[bool] = None
     works_enabled: Optional[bool] = None
+    refill: Optional[bool] = None
     remark: Optional[str] = None
     streamer_name: Optional[str] = None
 
@@ -349,13 +350,20 @@ async def update_room(room_id: int, room: RoomUpdate, background_tasks: Backgrou
         if not puid:
             raise HTTPException(status_code=400, detail="开启作品订阅需先填写主页地址（或等直播间检测自动识别主播）")
 
+    # 重新回填：清除 backfill_done，下次检查重新全量翻页（已入库作品由唯一约束去重）
+    refill_requested = update_data.pop("refill", None)
+    if refill_requested:
+        if not existing.works_enabled:
+            raise HTTPException(status_code=400, detail="该主播未开启作品订阅")
+        update_data["backfill_done"] = False
+
     await db.execute(update(Room).where(Room.id == room_id).values(**update_data))
     await db.commit()
 
     # 编辑后立即后台重新检测一次，标题/状态/主播名无需等下个监控周期才刷新
     background_tasks.add_task(monitor.check_room_now, room_id)
-    # 开启/重新开启作品订阅时触发立即检查（未回填则开始回填）
-    if update_data.get("works_enabled"):
+    # 开启/重新开启作品订阅或重新回填时触发立即检查
+    if update_data.get("works_enabled") or refill_requested:
         background_tasks.add_task(works_check_task, room_id)
 
     return {"message": "更新成功"}

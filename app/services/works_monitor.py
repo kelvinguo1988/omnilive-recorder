@@ -249,12 +249,25 @@ class WorksMonitor:
             if limit and total + len(works) > limit:
                 works = works[: max(limit - total, 0)]
                 truncated = True
-            total += await self._insert_new_works(room.id, works)
+            added = await self._insert_new_works(room.id, works)
+            total += added
             page_guard += 1
             if limit and total >= limit:
                 logger.info(f"主播 {label} 回填达到上限 {limit} 条，截断")
                 break
             if truncated or not has_more or not works or page_guard >= 500:
+                # 游客态/风控常见截断特征：首页满页 has_more=True 但次页即空。
+                # 明确提示，避免用户误以为已回填全部
+                if total >= settings.works_check_count and not works:
+                    logger.warning(
+                        f"主播 {label} 翻页提前终止（累计 {total} 条后次页为空）："
+                        f"游客态/风控可能截断了分页，配置该平台登录态 Cookie 后"
+                        f"点「重新回填」可补全历史作品"
+                    )
+                break
+            # 原地踏步保护：游标不前进或本页无新增却仍有 has_more，终止防死循环
+            if next_cursor == cursor or (not added and works):
+                logger.warning(f"主播 {label} 翻页游标未前进/无新增，提前终止（防循环）")
                 break
             cursor = next_cursor
             await asyncio.sleep(random.uniform(2.0, 5.0))

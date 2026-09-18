@@ -349,9 +349,11 @@ class DouyinPlatform(BasePlatform):
                 w = self._aweme_to_work(aweme)
                 if w and w.work_id:
                     works.append(w)
-            has_more = data.get("has_more") == 1
+            has_more = data.get("has_more") in (1, True, "1")
             try:
-                next_cursor = int(data.get("max_cursor") or cursor)
+                # max_cursor=0 是合法值（不可用 or 吞掉），缺失才回退当前游标
+                raw = data.get("max_cursor")
+                next_cursor = int(raw) if raw is not None else cursor
             except (ValueError, TypeError):
                 next_cursor = cursor
             return works, next_cursor, has_more
