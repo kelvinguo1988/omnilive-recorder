@@ -47,9 +47,11 @@ class SettingsUpdate(BaseModel):
 
 
 _VALID_FORMATS = {"ts", "flv", "mp4"}
+# 必须为正整数的字段；works_backfill_limit 的 0 有语义（=回填全部），单独按非负校验
 _INT_FIELDS = ("segment_time", "monitor_interval", "check_timeout",
                "max_disk_usage", "works_poll_interval", "works_check_count",
-               "works_backfill_limit", "sync_interval")
+               "sync_interval")
+_NONNEG_INT_FIELDS = ("works_backfill_limit",)
 _PROXY_RELATED = ("proxy_addr", "enable_proxy", "douyin_cookie", "bilibili_cookie", "kuaishou_cookie")
 
 
@@ -229,6 +231,15 @@ async def _apply_settings(updates: dict):
                 raise HTTPException(status_code=400, detail=f"{field} 必须为整数")
             if val <= 0:
                 raise HTTPException(status_code=400, detail=f"{field} 必须为正数")
+            updates[field] = val
+    for field in _NONNEG_INT_FIELDS:
+        if field in updates:
+            try:
+                val = int(updates[field])
+            except (ValueError, TypeError):
+                raise HTTPException(status_code=400, detail=f"{field} 必须为整数")
+            if val < 0:
+                raise HTTPException(status_code=400, detail=f"{field} 不能为负")
             updates[field] = val
 
     # 浮点字段校验

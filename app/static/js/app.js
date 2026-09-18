@@ -741,6 +741,12 @@ async function saveSettings(e) {
         sync_root: getField('set_sync_root').trim(),
         sync_interval: parseInt(getField('set_sync_interval'), 10) || 0,
     };
+    // 正整数字段留空/为 0 时不提交（后端仅更新传入项），避免保存 Cookie 等其它
+    // 设置时被无关字段的"必须为正数"校验误拦；0 有语义的字段（回填上限/合并上限）始终提交
+    for (const k of ["segment_time", "monitor_interval", "check_timeout",
+                     "max_disk_usage", "works_check_count", "sync_interval"]) {
+        if (!(payload[k] > 0)) delete payload[k];
+    }
     // 检测间隔留空则不提交（后端只更新传入字段），避免 0 被"必须为正数"校验拒绝
     const pollInterval = parseInt(getField('set_works_poll_interval'), 10);
     if (pollInterval > 0) payload.works_poll_interval = pollInterval;
