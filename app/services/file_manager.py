@@ -102,7 +102,8 @@ class FileManager:
         base_path = os.path.abspath(self.output_dir)
         full_path = os.path.abspath(os.path.join(base_path, rel_path))
 
-        if not full_path.startswith(base_path):
+        # 必须以分隔符结尾再比较，防止 /app/recordings 前缀误匹配 /app/recordings_evil
+        if not full_path.startswith(base_path + os.sep):
             raise HTTPException(status_code=403, detail="非法路径访问")
 
         if not os.path.exists(full_path):
@@ -236,7 +237,7 @@ class FileManager:
         abs_paths = []
         for rel in file_paths:
             full = os.path.abspath(os.path.join(base_path, rel))
-            if not full.startswith(base_path):
+            if not full.startswith(base_path + os.sep):
                 return {"success": False, "error": f"非法路径: {rel}"}
             if not os.path.exists(full):
                 return {"success": False, "error": f"文件不存在: {rel}"}
@@ -249,7 +250,7 @@ class FileManager:
                 else os.path.join(base_path, output_path)
             out_path = os.path.abspath(out_path)
             # 安全校验：合并结果也必须位于输出目录内
-            if not out_path.startswith(base_path):
+            if not out_path.startswith(base_path + os.sep):
                 return {"success": False, "error": f"非法输出路径: {output_path}"}
             out_dir = os.path.dirname(out_path)
             os.makedirs(out_dir, exist_ok=True)

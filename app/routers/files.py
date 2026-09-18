@@ -20,8 +20,10 @@ class BatchDeleteRequest(BaseModel):
 
 @router.get("")
 async def list_files(platform: str = None, streamer: str = None):
-    """获取文件列表"""
-    return file_manager.get_file_list(platform=platform, streamer=streamer)
+    """获取文件列表（os.walk 全量遍历放线程池，避免大目录阻塞事件循环）"""
+    return await asyncio.to_thread(
+        file_manager.get_file_list, platform=platform, streamer=streamer
+    )
 
 
 @router.get("/streamers")

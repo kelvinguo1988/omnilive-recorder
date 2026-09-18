@@ -1,4 +1,5 @@
 """系统状态API"""
+import asyncio
 import json
 import psutil
 import platform
@@ -70,11 +71,11 @@ async def system_info(db: AsyncSession = Depends(get_db)):
         select(func.count(Recording.id)).where(Recording.status == "completed")
     )
 
-    # 磁盘使用
-    disk = file_manager.get_disk_usage()
+    # 磁盘使用（全量 os.walk 较慢，放线程池避免阻塞事件循环——仪表盘每 15s 轮询本接口）
+    disk = await asyncio.to_thread(file_manager.get_disk_usage)
 
-    # 系统信息
-    cpu_percent = psutil.cpu_percent(interval=1)
+    # 系统信息（interval=1 会采样 1 秒，同样不能阻塞事件循环）
+    cpu_percent = await asyncio.to_thread(psutil.cpu_percent, 1)
     memory = psutil.virtual_memory()
 
     return {
