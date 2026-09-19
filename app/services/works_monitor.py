@@ -64,6 +64,7 @@ class WorksMonitor:
             return
         self._running = True
         await self._recover_stale_works()
+        await self.import_existing_files()
         self._task = asyncio.create_task(self._loop())
         logger.info("作品订阅监控已启动")
 
@@ -86,6 +87,93 @@ class WorksMonitor:
                     logger.warning(f"恢复 {res.rowcount} 条遗留 downloading 作品为待下载")
         except Exception as e:
             logger.error(f"恢复遗留 downloading 作品失败: {e}")
+
+    # ---------- 磁盘已有文件认领（重建/迁移后防重复下载） ----------
+
+    # 作品文件扩展名（视频/图集zip），与 _download_work 的命名约定对应
+    _WORK_EXTS = (".mp4", ".zip", ".flv", ".ts", ".mkv")
+
+    def _works_file_index(self, room: Room) -> dict:
+        """扫描主播作品目录，返回 {platform_work_id: 相对路径}。
+
+        文件名约定（_download_work 生成）：{YYYYMMDD}_{标题}_{作品ID}.{扩展名}，
+        作品ID 取文件名主干末段（rsplit 防标题含下划线）。
+        """
+        dir_path = os.path.join(
+            settings.output_dir, "works",
+            PLATFORM_CN.get(room.platform, room.platform),
+            recorder._sanitize_filename(room.streamer_name or room.platform_user_id),
+        )
+        index = {}
+        if not os.path.isdir(dir_path):
+            return index
+        for name in os.listdir(dir_path):
+            stem, ext = os.path.splitext(name)
+            if ext.lower() not in self._WORK_EXTS or name.startswith("."):
+                continue
+            wid = stem.rsplit("_", 1)[-1]
+            if wid:
+                index[wid] = os.path.relpath(os.path.join(dir_path, name),
+                                             settings.output_dir)
+        return index
+
+    async def import_existing_files(self):
+        """启动时认领磁盘上已存在的作品文件（对标直播录制的启动自愈）。
+
+        解决重建容器/迁移/换库后的重复下载：
+        - 磁盘有文件但 DB 无记录（如数据库重置）→ 以 completed 导入，标题从文件名还原
+        - DB 有记录但状态非完成且磁盘文件存在（如状态残留）→ 修复为 completed
+        全部走唯一约束与 ID 索引比对，不发起任何网络请求。
+        """
+        try:
+            async with async_session() as session:
+                rooms = (await session.execute(
+                    select(Room).where(Room.works_enabled == True)
+                )).scalars().all()
+
+            imported = fixed = 0
+            for room in rooms:
+                index = await asyncio.to_thread(self._works_file_index, room)
+                if not index:
+                    continue
+                async with async_session() as session:
+                    rows = (await session.execute(
+                        select(Work).where(Work.creator_id == room.id)
+                    )).scalars().all()
+                    by_id = {w.platform_work_id: w for w in rows}
+                    for wid, rel in index.items():
+                        abs_path = os.path.join(settings.output_dir, rel)
+                        size = os.path.getsize(abs_path)
+                        w = by_id.get(wid)
+                        if w is None:
+                            stem = os.path.splitext(os.path.basename(rel))[0]
+                            date_part, _, rest = stem.partition("_")
+                            title = rest.rsplit("_", 1)[0] if "_" in rest else rest
+                            session.add(Work(
+                                creator_id=room.id,
+                                platform_work_id=wid,
+                                work_type="images" if rel.lower().endswith(".zip") else "video",
+                                title=title[:500] or None,
+                                file_path=rel,
+                                file_size=size,
+                                status="completed",
+                                downloaded_at=datetime.utcnow(),
+                            ))
+                            imported += 1
+                        elif w.status != "completed":
+                            w.file_path = rel
+                            w.file_size = size
+                            w.status = "completed"
+                            w.error_message = None
+                            fixed += 1
+                    await session.commit()
+            if imported or fixed:
+                logger.warning(
+                    f"作品文件认领完成: 新导入 {imported} 条, 修复状态 {fixed} 条"
+                    f"（磁盘已有文件不再重新下载）"
+                )
+        except Exception as e:
+            logger.error(f"作品文件认领失败: {e}")
 
     async def stop(self):
         self._running = False
@@ -281,9 +369,15 @@ class WorksMonitor:
         return total
 
     async def _insert_new_works(self, room_id: int, works: list) -> int:
-        """作品入库（查重+唯一约束兜底），返回新增条数"""
+        """作品入库（查重+唯一约束兜底），返回新增条数。
+
+        入库前比对磁盘：该作品的文件已存在（重建/迁移后重新回填的场景）
+        → 直接以 completed 入库，不再进下载队列；只对磁盘没有的作品排队下载。
+        """
         added = 0
         async with async_session() as session:
+            room = await session.get(Room, room_id)
+            disk_index = await asyncio.to_thread(self._works_file_index, room) if room else {}
             for w in works:
                 exists = await session.execute(
                     select(Work.id).where(
@@ -293,6 +387,15 @@ class WorksMonitor:
                 )
                 if exists.first():
                     continue
+                rel_path = disk_index.get(w.work_id)
+                if rel_path:
+                    status = "completed"
+                    file_size = os.path.getsize(os.path.join(settings.output_dir, rel_path))
+                    file_path = rel_path
+                else:
+                    status = "pending"
+                    file_size = 0
+                    file_path = None
                 session.add(Work(
                     creator_id=room_id,
                     platform_work_id=w.work_id,
@@ -301,7 +404,10 @@ class WorksMonitor:
                     publish_time=datetime.fromtimestamp(w.publish_ts).replace(tzinfo=None) if w.publish_ts else None,
                     duration=w.duration,
                     download_urls=json.dumps(w.download_urls, ensure_ascii=False) if w.download_urls else None,
-                    status="pending",
+                    status=status,
+                    file_path=file_path,
+                    file_size=file_size,
+                    downloaded_at=datetime.utcnow() if status == "completed" else None,
                 ))
                 added += 1
             if added:
