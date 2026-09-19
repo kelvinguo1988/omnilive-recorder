@@ -268,7 +268,9 @@ class FileManager:
         list_path = os.path.join(os.path.dirname(out_path), f"_list_{ts}.txt")
         with open(list_path, "w", encoding="utf-8") as f:
             for p in abs_paths:
-                f.write(f"file '{p}'\n")
+                # _sanitize_filename 不清洗撇号, 标题含 ' 的文件名会让 concat
+                # demuxer 解析失败 —— 单引号需转义为 '\'' (闭引号+转义撇号+重开引号)
+                f.write(f"file '{p.replace(chr(39), chr(39) + chr(92) + chr(39) + chr(39))}'\n")
 
         cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
                "-f", "concat", "-safe", "0", "-i", list_path]

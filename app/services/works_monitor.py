@@ -117,6 +117,22 @@ class WorksMonitor:
                                              settings.output_dir)
         return index
 
+    def _cleanup_part_files(self, room: Room):
+        """删除主播作品目录下的 .part 半成品（下载中断残留，无完整数据）"""
+        dir_path = os.path.join(
+            settings.output_dir, "works",
+            PLATFORM_CN.get(room.platform, room.platform),
+            recorder._sanitize_filename(room.streamer_name or room.platform_user_id),
+        )
+        if not os.path.isdir(dir_path):
+            return
+        for name in os.listdir(dir_path):
+            if name.endswith(".part"):
+                try:
+                    os.remove(os.path.join(dir_path, name))
+                except OSError:
+                    pass
+
     async def import_existing_files(self):
         """启动时认领磁盘上已存在的作品文件（对标直播录制的启动自愈）。
 
@@ -133,6 +149,8 @@ class WorksMonitor:
 
             imported = fixed = 0
             for room in rooms:
+                # 清理上次异常退出残留的 .part 半成品（不被索引认领, 只会越积越多）
+                await asyncio.to_thread(self._cleanup_part_files, room)
                 index = await asyncio.to_thread(self._works_file_index, room)
                 if not index:
                     continue
