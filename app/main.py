@@ -43,6 +43,27 @@ class AuthMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+def _check_persistent_mounts():
+    """启动自检：输出/同步目录必须是容器内挂载点（卷/bind mount）。
+
+    若用户在设置里把 output_dir/sync_root 改成未映射路径，数据会写进容器
+    可写层——功能全部正常但重建容器即静默丢失。这里在启动时明确告警。
+    """
+    checks = [("录制输出目录", settings.output_dir)]
+    if settings.sync_enabled and settings.sync_root:
+        checks.append(("NAS 同步根目录", settings.sync_root))
+    for label, path in checks:
+        try:
+            if os.path.isdir(path) and not os.path.ismount(path):
+                logger.warning(
+                    f"⚠️ {label} {path} 不是容器内挂载点！数据将写入容器可写层，"
+                    f"重建容器即全部丢失。请在 docker-compose/Container Station "
+                    f"把 NAS 目录以卷形式挂载到该路径（named volume 或 bind mount）。"
+                )
+        except OSError:
+            pass
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期"""
@@ -56,6 +77,7 @@ async def lifespan(app: FastAPI):
 
     await init_db()
     logger.info("数据库初始化完成")
+    _check_persistent_mounts()
 
     await monitor.start()
     logger.info("监控调度器已启动")
