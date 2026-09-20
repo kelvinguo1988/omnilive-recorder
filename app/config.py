@@ -125,7 +125,7 @@ def _apply_ini(config: AppConfig, path: str):
     """将 INI 文件 DEFAULT 节的值应用到 config 实例（不存在则跳过）"""
     if not path or not os.path.exists(path):
         return
-    parser = configparser.ConfigParser()
+    parser = configparser.ConfigParser(interpolation=None)
     parser.read(path, encoding="utf-8")
     # DEFAULT 是 configparser 的保留节，parser["DEFAULT"] 始终可用
     section = parser["DEFAULT"]
@@ -179,7 +179,9 @@ def save_config(config: AppConfig = None) -> bool:
         config = settings
 
     config_path = _get_runtime_config_path(config)
-    parser = configparser.ConfigParser()
+    # interpolation=None: Cookie/Webhook 里常含 %（如 ttwid=1%7C...），默认的基本插值
+    # 会在写入时抛 InterpolationSyntaxError（读同理），导致保存设置 500、手改配置则启动崩
+    parser = configparser.ConfigParser(interpolation=None)
     if os.path.exists(config_path):
         parser.read(config_path, encoding="utf-8")
     # DEFAULT 是 configparser 的保留节，已内置，不能 add_section，直接写入即可

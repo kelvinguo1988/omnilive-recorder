@@ -4,7 +4,6 @@ import json
 import psutil
 import platform
 import os
-from datetime import datetime
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
@@ -13,7 +12,7 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models import Room, Recording, SystemLog
-from app.utils import iso
+from app.utils import iso, utcnow
 from app.services.file_manager import file_manager
 from app.services.recorder import recorder
 from app.services.sync_service import sync_service
@@ -60,10 +59,29 @@ _PROXY_RELATED = ("proxy_addr", "enable_proxy", "douyin_cookie", "bilibili_cooki
 # 设置项清单（响应/导出/校验共用，杜绝多处手抄漂移）
 _SETTINGS_KEYS = tuple(SettingsUpdate.model_fields.keys())
 
+# 敏感项：Cookie 是平台账号登录态，代理地址常内嵌账密，webhook 可被用来导走通知，
+# 一律不出现在任何对外响应里（含备份导出）。未鉴权时同网段任一主机都能读，
+# 泄露后果比丢录像严重得多。
+_SENSITIVE_KEYS = ("douyin_cookie", "bilibili_cookie", "kuaishou_cookie", "proxy_addr", "webhook_url")
+# 掩码值同时作为"客户端原样回传 = 未改动"的哨兵，见 _apply_settings
+_MASK_MARK = "已隐藏·"
+
+
+def _mask(value: str) -> str:
+    return f"{_MASK_MARK}{len(value)}字符"
+
+
+def _is_masked(value) -> bool:
+    return isinstance(value, str) and value.startswith(_MASK_MARK)
+
 
 def _settings_dict() -> dict:
-    """当前设置的完整快照（字段清单与 SettingsUpdate 对齐）"""
-    return {k: getattr(settings, k) for k in _SETTINGS_KEYS}
+    """当前设置快照（字段与 SettingsUpdate 对齐），敏感项脱敏"""
+    result = {k: getattr(settings, k) for k in _SETTINGS_KEYS}
+    for key in _SENSITIVE_KEYS:
+        if result.get(key):
+            result[key] = _mask(result[key])
+    return result
 
 
 @router.get("/info")
@@ -159,7 +177,10 @@ async def get_platforms():
 
 @router.put("/settings")
 async def update_settings(data: SettingsUpdate):
-    """更新系统设置（运行时生效 + 持久化到配置文件）"""
+    """更新系统设置（运行时生效 + 持久化到配置文件）
+
+    敏感项（Cookie/代理/Webhook）不回显，未改动请勿提交；显式提交 "" 表示清除。
+    """
     updates = {
         k: v for k, v in data.model_dump(exclude_unset=True).items()
         if v is not None
@@ -172,6 +193,7 @@ async def import_settings(data: dict):
     """从 JSON 批量导入系统设置（用于备份 / 迁移）
 
     仅接受已知设置字段；布尔值为 false 时也保留（不会被过滤）。
+    备份导出已脱敏，其中的掩码字段会被跳过，迁移后需在设置页重填。
     """
     known = set(SettingsUpdate.model_fields.keys())
     updates = {k: v for k, v in data.items() if k in known and v is not None}
@@ -182,6 +204,11 @@ async def import_settings(data: dict):
 
 async def _apply_settings(updates: dict):
     """校验 + 应用 + 持久化设置（PUT 与 import 共用）"""
+    # 客户端把响应里的掩码原样回传（页面未刷新 / 旧缓存 JS / 导入脱敏备份）时，
+    # 视为"未改动"，否则会把 "已隐藏·N字符" 写进真值里，直接弄废登录态
+    for key in _SENSITIVE_KEYS:
+        if key in updates and _is_masked(updates[key]):
+            del updates[key]
     if not updates:
         raise HTTPException(status_code=400, detail="未提供任何要更新的设置项")
 
@@ -285,11 +312,15 @@ async def run_sync_now():
 
 @router.get("/settings/export")
 async def export_settings():
-    """导出当前系统设置为 JSON（备份 / 迁移用）"""
+    """导出当前系统设置为 JSON（备份 / 迁移用）
+
+    敏感项只导出掩码：备份文件常被随手转发/存档，不能带走登录态。
+    """
     data = {
         "version": 1,
         "type": "omnilive-settings",
-        "exported_at": datetime.now().isoformat(),
+        "exported_at": iso(utcnow()),
+        "note": "Cookie / 代理地址 / Webhook 已脱敏，导入时这些字段会被跳过，迁移后请在设置页重新填写",
         "settings": _settings_dict(),
     }
     body = json.dumps(data, ensure_ascii=False, indent=2)

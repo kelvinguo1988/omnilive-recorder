@@ -647,6 +647,26 @@ async function deleteWork(id) {
 }
 
 // 系统设置
+// 敏感项后端只回掩码（登录态/代理账密不外泄），输入框因此永远留空：
+// 空=保持不变，粘贴新值=覆盖，单独输入 -=清除
+const SENSITIVE_FIELDS = {
+    webhook_url: 'set_webhook_url',
+    proxy_addr: 'set_proxy_addr',
+    douyin_cookie: 'set_douyin_cookie',
+    bilibili_cookie: 'set_bilibili_cookie',
+    kuaishou_cookie: 'set_kuaishou_cookie',
+};
+
+function fillSensitive(s) {
+    for (const [key, id] of Object.entries(SENSITIVE_FIELDS)) {
+        const el = document.getElementById(id);
+        if (!el) continue;
+        el.value = '';
+        if (!el.dataset.origPh) el.dataset.origPh = el.placeholder;
+        el.placeholder = s[key] ? `${s[key]}，留空=保持不变 · 粘贴新值=覆盖 · 输入 -=清除` : el.dataset.origPh;
+    }
+}
+
 async function loadSettings() {
     try {
         const info = await API.get('/api/system/info');
@@ -660,11 +680,7 @@ async function loadSettings() {
         setField('set_daily_merge_max_gb', s.daily_merge_max_gb);
         setField('set_output_dir', s.output_dir);
         setField('set_filename_template', s.filename_template);
-        setField('set_webhook_url', s.webhook_url);
-        setField('set_proxy_addr', s.proxy_addr);
-        setField('set_douyin_cookie', s.douyin_cookie);
-        setField('set_bilibili_cookie', s.bilibili_cookie);
-        setField('set_kuaishou_cookie', s.kuaishou_cookie);
+        fillSensitive(s);
         setCheck('set_enable_notification', s.enable_notification);
         setCheck('set_enable_proxy', s.enable_proxy);
         setField('set_works_poll_interval', s.works_poll_interval);
@@ -729,11 +745,6 @@ async function saveSettings(e) {
         daily_merge_max_gb: parseFloat(getField('set_daily_merge_max_gb')) || 0,
         output_dir: getField('set_output_dir'),
         filename_template: getField('set_filename_template'),
-        webhook_url: getField('set_webhook_url'),
-        proxy_addr: getField('set_proxy_addr'),
-        douyin_cookie: getField('set_douyin_cookie'),
-        bilibili_cookie: getField('set_bilibili_cookie'),
-        kuaishou_cookie: getField('set_kuaishou_cookie'),
         enable_notification: getCheck('set_enable_notification'),
         enable_proxy: getCheck('set_enable_proxy'),
         works_backfill_limit: parseInt(getField('set_works_backfill_limit'), 10) || 0,
@@ -751,6 +762,12 @@ async function saveSettings(e) {
     // 检测间隔留空则不提交（后端只更新传入字段），避免 0 被"必须为正数"校验拒绝
     const pollInterval = parseInt(getField('set_works_poll_interval'), 10);
     if (pollInterval > 0) payload.works_poll_interval = pollInterval;
+    // 敏感项未改动则不提交，否则保存其它设置时会把空输入框当成"清除"写掉凭据
+    for (const [key, id] of Object.entries(SENSITIVE_FIELDS)) {
+        const val = getField(id).trim();
+        if (val === '-') payload[key] = '';
+        else if (val) payload[key] = val;
+    }
 
     const btn = e && e.target;
     const oldLabel = btn ? btn.textContent : '';
