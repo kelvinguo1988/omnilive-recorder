@@ -1,7 +1,7 @@
 """数据库模型定义"""
-from datetime import datetime, timezone
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, Float, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, relationship
+from app.utils import utcnow
 
 
 class Base(DeclarativeBase):
@@ -37,8 +37,8 @@ class Room(Base):
     last_check_time = Column(DateTime, nullable=True, comment="最后直播检测时间")
     last_live_time = Column(DateTime, nullable=True, comment="最后直播时间")
     remark = Column(String(200), nullable=True, comment="备注")
-    created_at = Column(DateTime, default=datetime.now(timezone.utc).replace(tzinfo=None), comment="创建时间")
-    updated_at = Column(DateTime, default=datetime.now(timezone.utc).replace(tzinfo=None), onupdate=datetime.now(timezone.utc).replace(tzinfo=None), comment="更新时间")
+    created_at = Column(DateTime, default=utcnow, comment="创建时间")
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, comment="更新时间")
 
     recordings = relationship("Recording", back_populates="room", cascade="all, delete-orphan")
     works = relationship("Work", back_populates="room", cascade="all, delete-orphan")
@@ -56,7 +56,7 @@ class Recording(Base):
     duration = Column(Float, default=0, comment="录制时长(秒)")
     format = Column(String(10), default="ts", comment="文件格式")
     status = Column(String(20), default="pending", comment="状态: recording/completed/failed")
-    started_at = Column(DateTime, default=datetime.now(timezone.utc).replace(tzinfo=None), comment="开始时间")
+    started_at = Column(DateTime, default=utcnow, comment="开始时间")
     ended_at = Column(DateTime, nullable=True, comment="结束时间")
     error_message = Column(Text, nullable=True, comment="错误信息")
     part_paths = Column(Text, nullable=True, comment="多段录制part路径列表(JSON)，断流重连时追加")
@@ -72,7 +72,7 @@ class SystemLog(Base):
     level = Column(String(20), default="info", comment="日志级别")
     module = Column(String(50), nullable=True, comment="模块")
     message = Column(Text, nullable=False, comment="日志内容")
-    created_at = Column(DateTime, default=datetime.now(timezone.utc).replace(tzinfo=None), comment="创建时间")
+    created_at = Column(DateTime, default=utcnow, comment="创建时间")
 
 
 class Work(Base):
@@ -95,6 +95,6 @@ class Work(Base):
     status = Column(String(20), default="pending", comment="状态: pending/downloading/completed/failed")
     error_message = Column(Text, nullable=True, comment="失败原因")
     downloaded_at = Column(DateTime, nullable=True, comment="下载完成时间")
-    created_at = Column(DateTime, default=datetime.now(timezone.utc).replace(tzinfo=None), comment="入库时间")
+    created_at = Column(DateTime, default=utcnow, comment="入库时间")
 
     room = relationship("Room", back_populates="works")

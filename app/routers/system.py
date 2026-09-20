@@ -13,6 +13,7 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models import Room, Recording, SystemLog
+from app.utils import iso
 from app.services.file_manager import file_manager
 from app.services.recorder import recorder
 from app.services.sync_service import sync_service
@@ -27,6 +28,7 @@ class SettingsUpdate(BaseModel):
     segment_time: Optional[int] = None
     monitor_interval: Optional[int] = None
     check_timeout: Optional[int] = None
+    stream_url_refresh_interval: Optional[int] = None
     output_dir: Optional[str] = None
     max_disk_usage: Optional[int] = None
     filename_template: Optional[str] = None
@@ -48,12 +50,20 @@ class SettingsUpdate(BaseModel):
 
 
 _VALID_FORMATS = {"ts", "flv", "mp4"}
-# 必须为正整数的字段；works_backfill_limit 的 0 有语义（=回填全部），单独按非负校验
+# 必须为正整数的字段；0 有语义的字段（=关闭/不限制）按非负校验
 _INT_FIELDS = ("segment_time", "monitor_interval", "check_timeout",
                "max_disk_usage", "works_poll_interval", "works_check_count",
                "sync_interval")
-_NONNEG_INT_FIELDS = ("works_backfill_limit",)
+_NONNEG_INT_FIELDS = ("works_backfill_limit", "stream_url_refresh_interval")
 _PROXY_RELATED = ("proxy_addr", "enable_proxy", "douyin_cookie", "bilibili_cookie", "kuaishou_cookie")
+
+# 设置项清单（响应/导出/校验共用，杜绝多处手抄漂移）
+_SETTINGS_KEYS = tuple(SettingsUpdate.model_fields.keys())
+
+
+def _settings_dict() -> dict:
+    """当前设置的完整快照（字段清单与 SettingsUpdate 对齐）"""
+    return {k: getattr(settings, k) for k in _SETTINGS_KEYS}
 
 
 @router.get("/info")
@@ -98,31 +108,8 @@ async def system_info(db: AsyncSession = Depends(get_db)):
             "completed": completed_recordings,
         },
         "active_recordings": len(recorder.active_processes),
-            "settings": {
-                "record_format": settings.record_format,
-                "segment_time": settings.segment_time,
-                "monitor_interval": settings.monitor_interval,
-                "check_timeout": settings.check_timeout,
-                "output_dir": settings.output_dir,
-                "max_disk_usage": settings.max_disk_usage,
-                "filename_template": settings.filename_template,
-                "enable_notification": settings.enable_notification,
-                "webhook_url": settings.webhook_url,
-                "enable_proxy": settings.enable_proxy,
-                "proxy_addr": settings.proxy_addr,
-                "douyin_cookie": settings.douyin_cookie,
-                "bilibili_cookie": settings.bilibili_cookie,
-                "kuaishou_cookie": settings.kuaishou_cookie,
-                "works_poll_interval": settings.works_poll_interval,
-                "works_check_count": settings.works_check_count,
-                "works_auto_download": settings.works_auto_download,
-                "works_backfill_limit": settings.works_backfill_limit,
-                "daily_merge_max_gb": settings.daily_merge_max_gb,
-                "sync_enabled": settings.sync_enabled,
-                "sync_root": settings.sync_root,
-                "sync_interval": settings.sync_interval,
-            },
-        }
+        "settings": _settings_dict(),
+    }
 
 
 @router.get("/logs")
@@ -141,7 +128,7 @@ async def get_logs(limit: int = 100, level: str = None, db: AsyncSession = Depen
             "level": log.level,
             "module": log.module,
             "message": log.message,
-            "created_at": log.created_at.isoformat() if log.created_at else None,
+            "created_at": iso(log.created_at),
         }
         for log in logs
     ]
@@ -281,31 +268,8 @@ async def _apply_settings(updates: dict):
     return {
         "success": True,
         "message": "设置已更新",
-            "settings": {
-                "record_format": settings.record_format,
-                "segment_time": settings.segment_time,
-                "monitor_interval": settings.monitor_interval,
-                "check_timeout": settings.check_timeout,
-                "output_dir": settings.output_dir,
-                "max_disk_usage": settings.max_disk_usage,
-                "filename_template": settings.filename_template,
-                "enable_notification": settings.enable_notification,
-                "webhook_url": settings.webhook_url,
-                "enable_proxy": settings.enable_proxy,
-                "proxy_addr": settings.proxy_addr,
-                "douyin_cookie": settings.douyin_cookie,
-                "bilibili_cookie": settings.bilibili_cookie,
-                "kuaishou_cookie": settings.kuaishou_cookie,
-                "works_poll_interval": settings.works_poll_interval,
-                "works_check_count": settings.works_check_count,
-                "works_auto_download": settings.works_auto_download,
-                "works_backfill_limit": settings.works_backfill_limit,
-                "daily_merge_max_gb": settings.daily_merge_max_gb,
-                "sync_enabled": settings.sync_enabled,
-                "sync_root": settings.sync_root,
-                "sync_interval": settings.sync_interval,
-            },
-        }
+        "settings": _settings_dict(),
+    }
 
 
 @router.post("/sync/run")
@@ -322,35 +286,11 @@ async def run_sync_now():
 @router.get("/settings/export")
 async def export_settings():
     """导出当前系统设置为 JSON（备份 / 迁移用）"""
-    s = settings
     data = {
         "version": 1,
         "type": "omnilive-settings",
         "exported_at": datetime.now().isoformat(),
-        "settings": {
-            "record_format": s.record_format,
-            "segment_time": s.segment_time,
-            "monitor_interval": s.monitor_interval,
-            "check_timeout": s.check_timeout,
-            "output_dir": s.output_dir,
-            "max_disk_usage": s.max_disk_usage,
-            "filename_template": s.filename_template,
-            "enable_notification": s.enable_notification,
-            "webhook_url": s.webhook_url,
-            "enable_proxy": s.enable_proxy,
-            "proxy_addr": s.proxy_addr,
-            "douyin_cookie": s.douyin_cookie,
-            "bilibili_cookie": s.bilibili_cookie,
-            "kuaishou_cookie": s.kuaishou_cookie,
-            "works_poll_interval": s.works_poll_interval,
-            "works_check_count": s.works_check_count,
-            "works_auto_download": s.works_auto_download,
-            "works_backfill_limit": s.works_backfill_limit,
-            "daily_merge_max_gb": s.daily_merge_max_gb,
-            "sync_enabled": s.sync_enabled,
-            "sync_root": s.sync_root,
-            "sync_interval": s.sync_interval,
-        },
+        "settings": _settings_dict(),
     }
     body = json.dumps(data, ensure_ascii=False, indent=2)
     return Response(

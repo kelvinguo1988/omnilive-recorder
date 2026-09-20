@@ -465,7 +465,8 @@ async function loadFiles() {
 
 function playFile(path) {
     const video = document.getElementById('videoPlayer');
-    video.src = '/api/files/play/' + path;
+    // 与下载链接一致按段编码：文件名含 # ? 空格时不编码会 404
+    video.src = '/api/files/play/' + path.split('/').map(encodeURIComponent).join('/');
     document.getElementById('playerTitle').textContent = path.split('/').pop();
     document.getElementById('playerModal').style.display = 'flex';
 }
@@ -480,7 +481,7 @@ function hidePlayer() {
 async function deleteFile(path) {
     if (!confirm('确认删除这个文件？此操作不可恢复。')) return;
     try {
-        await API.delete('/api/files/' + path);
+        await API.delete('/api/files/' + path.split('/').map(encodeURIComponent).join('/'));
         showToast('删除成功', 'success');
         loadFiles();
     } catch (e) { showToast('删除失败', 'error'); }

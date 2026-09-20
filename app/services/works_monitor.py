@@ -17,7 +17,7 @@ import random
 import time
 import zipfile
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -26,8 +26,10 @@ from sqlalchemy import select, update
 from app.database import async_session
 from app.models import Room, Work
 from app.config import settings
+from app.utils import utcnow
 from app.services.platform.base import WorkInfo, WORKS_UA, PLATFORM_CN
 from app.services.platform_manager import platform_manager
+from app.services.file_manager import file_manager
 from app.services.recorder import recorder
 
 logger = logging.getLogger(__name__)
@@ -56,6 +58,8 @@ class WorksMonitor:
         self._last_download_ts: dict = {}
         # 重入保护：API 触发的立即检查与循环检查不并发执行
         self._check_lock = asyncio.Lock()
+        # 磁盘水位告警节流
+        self._last_disk_warn: float = 0.0
 
     # ---------- 生命周期 ----------
 
@@ -175,7 +179,7 @@ class WorksMonitor:
                                 file_path=rel,
                                 file_size=size,
                                 status="completed",
-                                downloaded_at=datetime.utcnow(),
+                                downloaded_at=utcnow(),
                             ))
                             imported += 1
                         elif w.status != "completed":
@@ -329,7 +333,7 @@ class WorksMonitor:
                 f"{room.streamer_name or room.platform_user_id}: {e}"
             )
 
-        now = datetime.utcnow()
+        now = utcnow()
         async with async_session() as session:
             await session.execute(
                 update(Room).where(Room.id == room.id).values(last_work_check_time=now)
@@ -419,13 +423,13 @@ class WorksMonitor:
                     platform_work_id=w.work_id,
                     work_type=w.work_type,
                     title=(w.title or "")[:500],
-                    publish_time=datetime.fromtimestamp(w.publish_ts).replace(tzinfo=None) if w.publish_ts else None,
+                    publish_time=datetime.fromtimestamp(w.publish_ts, tz=timezone.utc).replace(tzinfo=None) if w.publish_ts else None,
                     duration=w.duration,
                     download_urls=json.dumps(w.download_urls, ensure_ascii=False) if w.download_urls else None,
                     status=status,
                     file_path=file_path,
                     file_size=file_size,
-                    downloaded_at=datetime.utcnow() if status == "completed" else None,
+                    downloaded_at=utcnow() if status == "completed" else None,
                 ))
                 added += 1
             if added:
@@ -437,6 +441,14 @@ class WorksMonitor:
     async def process_download_queue(self):
         """处理待下载作品（按平台串行 + 随机间隔限速）"""
         if not settings.works_auto_download:
+            return
+        if file_manager.disk_over_limit():
+            if time.time() - self._last_disk_warn > 600:
+                self._last_disk_warn = time.time()
+                logger.warning(
+                    f"磁盘使用率已达上限 {settings.max_disk_usage}%，暂停作品下载；"
+                    f"清理 {settings.output_dir} 或在设置页调高水位后自动恢复"
+                )
             return
         async with async_session() as session:
             result = await session.execute(
@@ -522,7 +534,7 @@ class WorksMonitor:
         os.makedirs(dir_path, exist_ok=True)
 
         date_str = work.publish_time.strftime("%Y%m%d") if work.publish_time else \
-            datetime.now().strftime("%Y%m%d")
+            utcnow().strftime("%Y%m%d")
         title = recorder._sanitize_filename(work.title or "")[:60] or "untitled"
         base = f"{date_str}_{title}_{work.platform_work_id}"
 
@@ -546,7 +558,7 @@ class WorksMonitor:
                     file_path=os.path.relpath(final_path, settings.output_dir),
                     file_size=size,
                     error_message=None,
-                    downloaded_at=datetime.utcnow(),
+                    downloaded_at=utcnow(),
                 )
             )
             await session.commit()

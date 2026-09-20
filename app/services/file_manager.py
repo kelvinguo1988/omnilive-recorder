@@ -38,8 +38,21 @@ class FileManager:
     def _cache_set(self, key: str, val):
         self._cache[key] = (time.time(), val)
 
-    def _invalidate(self, key: str):
+    def invalidate_cache(self, key: str):
         self._cache[key] = (0.0, None)
+
+    def disk_over_limit(self) -> bool:
+        """磁盘使用率是否达到 max_disk_usage 水位（单次 statfs 调用，很廉价）。
+
+        无法探测时保守放行（False），宁可漏拦也不误杀录制。
+        """
+        try:
+            usage = shutil.disk_usage(self.output_dir)
+            if usage.total <= 0:
+                return False
+            return (usage.used / usage.total) * 100 >= settings.max_disk_usage
+        except OSError:
+            return False
 
     def get_file_list(self, platform: str = None, streamer: str = None) -> list:
         """获取文件列表（带 TTL 缓存，P1-5）"""
@@ -117,7 +130,7 @@ class FileManager:
         try:
             os.remove(full_path)
             # P1-5: 删除后让文件列表缓存失效，避免前端看到残留条目
-            self._invalidate("file_list")
+            self.invalidate_cache("file_list")
             logger.info(f"已删除文件: {rel_path}")
 
             # 清理空目录
@@ -295,6 +308,8 @@ class FileManager:
             return {"success": False, "error": (proc.stderr or "ffmpeg 执行失败")[-600:]}
 
         size = os.path.getsize(out_path)
+        self.invalidate_cache("file_list")
+        self.invalidate_cache("disk_usage")
         return {
             "success": True,
             "output_path": out_path,

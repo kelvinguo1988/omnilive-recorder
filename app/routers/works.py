@@ -5,6 +5,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models import Room, Work
+from app.config import settings
+from app.utils import iso
 from app.services.platform.base import PLATFORM_CN
 from app.services.works_monitor import works_monitor
 
@@ -37,15 +39,15 @@ async def list_works(room_id: int = None, status: str = None, limit: int = 200,
             "platform_work_id": w.platform_work_id,
             "work_type": w.work_type,
             "title": w.title,
-            "publish_time": w.publish_time.isoformat() if w.publish_time else None,
+            "publish_time": iso(w.publish_time),
             "duration": round(w.duration, 1) if w.duration else 0,
             "file_path": w.file_path,
             "file_size": w.file_size,
             "file_size_mb": round(w.file_size / 1024 / 1024, 2) if w.file_size else 0,
             "status": w.status,
             "error_message": w.error_message,
-            "downloaded_at": w.downloaded_at.isoformat() if w.downloaded_at else None,
-            "created_at": w.created_at.isoformat() if w.created_at else None,
+            "downloaded_at": iso(w.downloaded_at),
+            "created_at": iso(w.created_at),
         }
         for w, c in rows
     ]
@@ -81,6 +83,8 @@ async def retry_work(work_id: int, background_tasks: BackgroundTasks,
     )
     await db.commit()
     background_tasks.add_task(works_monitor.process_download_queue)
+    if not settings.works_auto_download:
+        return {"message": "已置为待下载，但「作品自动下载」当前已关闭，不会实际下载（可在设置页开启）"}
     return {"message": "已加入下载队列"}
 
 

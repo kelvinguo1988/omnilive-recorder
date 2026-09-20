@@ -3,12 +3,15 @@ import json
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from fastapi.responses import Response
-from sqlalchemy import select, update, delete, func
+from sqlalchemy import select, update, delete, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 from typing import Optional, List
 from app.database import get_db
 from app.models import Room, Recording, Work
+from app.config import settings
+from app.utils import iso
+from app.services.file_manager import file_manager
 from app.services.platform import PlatformFactory
 from app.services.platform.base import PLATFORM_CN
 from app.services.monitor import monitor
@@ -61,6 +64,28 @@ def _extract_platform_user_id(platform: str, home_url: str) -> str:
     return cls.extract_user_id(home_url) if cls and home_url else ""
 
 
+async def _find_duplicate(db: AsyncSession, platform: str, url: str,
+                          home_url: str, platform_user_id: str):
+    """同平台查重：直播间地址/主页地址/平台用户ID 任一相同即为同一主播。
+
+    此前填了直播间地址时只比对 URL——同一主播（一个带直播间、一个只带主页）
+    会被重复添加，导致作品双份订阅与下载。
+    """
+    conds = []
+    if url:
+        conds.append(Room.url == url)
+    if home_url:
+        conds.append(Room.home_url == home_url)
+    if platform_user_id:
+        conds.append(Room.platform_user_id == platform_user_id)
+    if not conds:
+        return None
+    res = await db.execute(
+        select(Room).where(Room.platform == platform, or_(*conds))
+    )
+    return res.scalars().first()
+
+
 @router.get("")
 async def list_rooms(db: AsyncSession = Depends(get_db)):
     """主播列表（含直播状态与作品订阅统计）"""
@@ -105,18 +130,17 @@ async def list_rooms(db: AsyncSession = Depends(get_db)):
             "backfill_done": bool(r.backfill_done),
             "is_live": r.is_live,
             "is_recording": r.is_recording,
-            "last_check_time": r.last_check_time.isoformat() if r.last_check_time else None,
-            "last_live_time": r.last_live_time.isoformat() if r.last_live_time else None,
-            "last_work_check_time": r.last_work_check_time.isoformat() if r.last_work_check_time else None,
+            "last_check_time": iso(r.last_check_time),
+            "last_live_time": iso(r.last_live_time),
+            "last_work_check_time": iso(r.last_work_check_time),
             "remark": r.remark,
-            "created_at": r.created_at.isoformat() if r.created_at else None,
+            "created_at": iso(r.created_at),
             "works_total": works_stats.get(r.id, {}).get("total", 0),
             "works_completed": works_stats.get(r.id, {}).get("completed_count", 0),
             "works_pending": works_stats.get(r.id, {}).get("pending_count", 0),
             "works_failed": works_stats.get(r.id, {}).get("failed_count", 0),
             "works_size_mb": round(works_stats.get(r.id, {}).get("size", 0) / 1024 / 1024, 2),
-            "works_latest_time": works_stats.get(r.id, {}).get("latest").isoformat()
-                if works_stats.get(r.id, {}).get("latest") else None,
+            "works_latest_time": iso(works_stats.get(r.id, {}).get("latest")),
         }
         for r in rooms
     ]
@@ -141,15 +165,9 @@ async def create_room(room: RoomCreate, background_tasks: BackgroundTasks, db: A
     if not platform:
         raise HTTPException(status_code=400, detail="无法识别平台，请手动指定平台(douyin/bilibili/kuaishou)")
 
-    # 查重：同平台下直播间地址或平台用户ID任一相同即视为同一主播
+    # 查重：同平台下直播间地址/主页地址/平台用户ID任一相同即视为同一主播
     platform_user_id = _extract_platform_user_id(platform, home_url)
-    dup = await db.execute(
-        select(Room).where(
-            Room.platform == platform,
-            (Room.url == url) if url else (Room.platform_user_id == platform_user_id),
-        )
-    )
-    if dup.scalar_one_or_none():
+    if await _find_duplicate(db, platform, url, home_url, platform_user_id):
         raise HTTPException(status_code=400, detail="该主播已存在（直播间地址或主页地址重复）")
 
     new_room = Room(
@@ -249,13 +267,7 @@ async def import_rooms(payload: RoomsImport, db: AsyncSession = Depends(get_db))
             continue
 
         platform_user_id = _extract_platform_user_id(platform, home_url)
-        existing = await db.execute(
-            select(Room).where(
-                Room.platform == platform,
-                (Room.url == url) if url else (Room.platform_user_id == platform_user_id),
-            )
-        )
-        if existing.scalar_one_or_none():
+        if await _find_duplicate(db, platform, url, home_url, platform_user_id):
             skipped += 1
             continue
 
@@ -417,6 +429,13 @@ async def manual_start_recording(room_id: int, db: AsyncSession = Depends(get_db
     if not room.is_live:
         raise HTTPException(status_code=400, detail="未在直播中")
 
+    if file_manager.disk_over_limit():
+        raise HTTPException(
+            status_code=507,
+            detail=f"磁盘使用率已达上限 {settings.max_disk_usage}%，拒绝开始录制。"
+                   f"请清理磁盘或在设置页调高水位",
+        )
+
     # 获取流地址
     platform = await monitor._get_platform(room.platform)
     if not platform:
@@ -473,8 +492,8 @@ async def get_room_recordings(room_id: int, db: AsyncSession = Depends(get_db)):
             "duration": round(r.duration, 1) if r.duration else 0,
             "format": r.format,
             "status": r.status,
-            "started_at": r.started_at.isoformat() if r.started_at else None,
-            "ended_at": r.ended_at.isoformat() if r.ended_at else None,
+            "started_at": iso(r.started_at),
+            "ended_at": iso(r.ended_at),
             "error_message": r.error_message,
             "part_count": _part_count(r),
         }

@@ -1,10 +1,11 @@
 """录制记录API"""
 import json
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models import Recording, Room
+from app.utils import iso
 
 router = APIRouter(prefix="/api/recordings", tags=["recordings"])
 
@@ -44,8 +45,8 @@ async def list_recordings(skip: int = 0, limit: int = 50, db: AsyncSession = Dep
             "duration": round(r.duration, 1) if r.duration else 0,
             "format": r.format,
             "status": r.status,
-            "started_at": r.started_at.isoformat() if r.started_at else None,
-            "ended_at": r.ended_at.isoformat() if r.ended_at else None,
+            "started_at": iso(r.started_at),
+            "ended_at": iso(r.ended_at),
             "error_message": r.error_message,
             "part_count": _part_count(r),
         }
@@ -55,23 +56,27 @@ async def list_recordings(skip: int = 0, limit: int = 50, db: AsyncSession = Dep
 
 @router.get("/stats")
 async def get_stats(db: AsyncSession = Depends(get_db)):
-    """获取统计信息"""
-    result = await db.execute(select(Recording))
-    recordings = result.scalars().all()
+    """获取统计信息（单条聚合查询，避免全表载入内存）"""
+    from sqlalchemy import case
 
-    total = len(recordings)
-    completed = sum(1 for r in recordings if r.status == "completed")
-    recording = sum(1 for r in recordings if r.status == "recording")
-    failed = sum(1 for r in recordings if r.status == "failed")
-    total_size = sum(r.file_size or 0 for r in recordings)
-    total_duration = sum(r.duration or 0 for r in recordings)
+    row = (await db.execute(
+        select(
+            func.count(Recording.id),
+            func.sum(case((Recording.status == "completed", 1), else_=0)),
+            func.sum(case((Recording.status == "recording", 1), else_=0)),
+            func.sum(case((Recording.status == "failed", 1), else_=0)),
+            func.coalesce(func.sum(func.coalesce(Recording.file_size, 0)), 0),
+            func.coalesce(func.sum(func.coalesce(Recording.duration, 0)), 0),
+        )
+    )).one()
+    total, completed, recording, failed, total_size, total_duration = row
 
     return {
-        "total": total,
-        "completed": completed,
-        "recording": recording,
-        "failed": failed,
-        "total_size_mb": round(total_size / 1024 / 1024, 2),
-        "total_size_gb": round(total_size / 1024 / 1024 / 1024, 2),
-        "total_duration_hours": round(total_duration / 3600, 1),
+        "total": total or 0,
+        "completed": completed or 0,
+        "recording": recording or 0,
+        "failed": failed or 0,
+        "total_size_mb": round((total_size or 0) / 1024 / 1024, 2),
+        "total_size_gb": round((total_size or 0) / 1024 / 1024 / 1024, 2),
+        "total_duration_hours": round((total_duration or 0) / 3600, 1),
     }

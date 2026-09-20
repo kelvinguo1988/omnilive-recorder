@@ -4,12 +4,14 @@ import os
 import json
 import time
 import logging
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Optional
+import httpx
 from sqlalchemy import select, update, delete
 from app.database import async_session
 from app.models import Room, Recording, SystemLog
 from app.config import settings
+from app.utils import utcnow
 from app.services.recorder import recorder
 from app.services.file_manager import file_manager
 from app.services.platform import RoomInfo
@@ -34,6 +36,22 @@ class LiveMonitor:
         self._merge_lock = asyncio.Lock()
         # 后台任务强引用：事件循环只持弱引用，不保存会被垃圾回收中断
         self._bg_tasks: set = set()
+        # 磁盘水位告警节流（避免每轮监控刷屏）
+        self._last_disk_warn: float = 0.0
+
+    def _disk_over_limit_warn(self, context: str) -> bool:
+        """磁盘超过 max_disk_usage 水位时告警（10 分钟节流），返回是否超限"""
+        if not file_manager.disk_over_limit():
+            return False
+        if time.time() - self._last_disk_warn > 600:
+            self._last_disk_warn = time.time()
+            msg = (f"磁盘使用率已达上限 {settings.max_disk_usage}%，暂停{context}。"
+                   f"请清理 {settings.output_dir} 或在设置页调高水位后自动恢复")
+            logger.warning(msg)
+            task = asyncio.create_task(self._notify(msg))
+            self._bg_tasks.add(task)
+            task.add_done_callback(self._bg_tasks.discard)
+        return True
 
     async def _get_platform(self, platform_name: str):
         """获取平台适配器实例（共享 PlatformManager，Cookie/代理变化自动重建）"""
@@ -74,10 +92,16 @@ class LiveMonitor:
                 pass
         self._refresh_task = None
 
-        # 取消当日合并等后台任务（若 ffmpeg concat 正在进行，等待其完成写入，
-        # 避免强杀留下 .merge_tmp 半成品；bg 任务自身有异常保护）
+        # 取消当日合并等后台任务（若 ffmpeg concat 正在进行，给它一段完成窗口，
+        # 避免强杀留下 .merge_tmp 半成品；超窗则放行关闭，由容器停止信号兜底）
         if self._bg_tasks:
-            await asyncio.gather(*list(self._bg_tasks), return_exceptions=True)
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*list(self._bg_tasks), return_exceptions=True),
+                    timeout=8,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("后台合并任务未在 8s 内完成，跳过等待继续关闭")
             self._bg_tasks.clear()
 
         # P0-3: 优雅停止所有进行中的 ffmpeg，让 mp4 正常写 moov atom，避免文件损坏
@@ -148,13 +172,14 @@ class LiveMonitor:
                 )
                 recs = res.scalars().all()
                 for rec in recs:
-                    fp = rec.file_path or ""
+                    # file_path 存的是相对 output_dir 的路径（历史数据可能为绝对路径，join 时自动兼容）
+                    fp = os.path.join(settings.output_dir, rec.file_path) if rec.file_path else ""
                     size = os.path.getsize(fp) if fp and os.path.exists(fp) else 0
                     await session.execute(
                         update(Recording).where(Recording.id == rec.id).values(
                             status="failed",
                             file_size=size,
-                            ended_at=datetime.now(),
+                            ended_at=utcnow(),
                             error_message="服务重启恢复：检测到进行中但无录制进程，标记为失败",
                         )
                     )
@@ -169,7 +194,7 @@ class LiveMonitor:
 
     async def _cleanup_old_logs(self):
         """清理 30 天前的系统日志（P1-4），避免 system_logs 表无限增长。"""
-        cutoff = datetime.now() - timedelta(days=30)
+        cutoff = utcnow() - timedelta(days=30)
         async with async_session() as session:
             await session.execute(delete(SystemLog).where(SystemLog.created_at < cutoff))
             await session.commit()
@@ -250,7 +275,7 @@ class LiveMonitor:
             info: RoomInfo = await platform.get_room_info(room.url)
 
             was_live = room.is_live
-            now = datetime.utcnow()
+            now = utcnow()
 
             async with async_session() as session:
                 # 更新房间状态
@@ -274,22 +299,26 @@ class LiveMonitor:
                 await session.execute(
                     update(Room).where(Room.id == room.id).values(**update_data)
                 )
+                # P2-6: 提交后在同一 session 内重读最新 is_recording，
+                # 避免循环开始时的快照值在并发刷新/重连时误判
+                cur = (await session.execute(
+                    select(Room.is_recording).where(Room.id == room.id)
+                )).first()
                 await session.commit()
 
-            # P2-6: 重新读取最新 is_recording，避免循环开始时的快照值在并发刷新/重连时误判
-            cur = (await session.execute(
-                select(Room.is_recording).where(Room.id == room.id)
-            )).first()
             room_is_recording = bool(cur[0]) if cur else False
 
             # 状态变化处理
             if info.is_live and not room_is_recording:
                 # 开播且未在录制 - 开启一场新录制（首个 part）
-                if info.stream_url:
+                if not info.stream_url:
+                    logger.warning(f"房间 {room.id} 开播但未获取到流地址")
+                elif self._disk_over_limit_warn("新开播录制"):
+                    # 磁盘超水位：不再开新场次，等用户清理/调高阈值（下播最终化不受影响）
+                    pass
+                else:
                     await self._start_recording(room, info)
                     room.is_recording = True
-                else:
-                    logger.warning(f"房间 {room.id} 开播但未获取到流地址")
 
             elif not info.is_live and room_is_recording:
                 # 下播 - 结束当前场次（合并所有 part 为单个文件）
@@ -314,7 +343,9 @@ class LiveMonitor:
 
     async def _start_recording(self, room: Room, info: RoomInfo):
         """开播/手动开始：开启一场新录制（一条 Recording + 首个 part）"""
-        fmt = room.quality if room.quality and room.quality != "origin" else settings.record_format
+        # 文件格式只由全局 record_format 决定；room.quality 是画质语义，
+        # 绝不能当格式用（曾导致选"蓝光"生成 .blue_ray 文件 ffmpeg 直接失败）
+        fmt = settings.record_format
         # 主播名优先级：手动填写 > 平台探测 > 备注 > 房间ID。
         # 平台游客态常拿不到主播名，若不回退备注，文件名/目录会退化为纯房间号。
         streamer = room.streamer_name or info.streamer_name or room.remark or room.room_id
@@ -343,14 +374,15 @@ class LiveMonitor:
 
         if result["success"]:
             async with async_session() as session:
-                # 创建录制记录：file_path 指向最终文件，part_paths 记录首个分片
+                # 创建录制记录：file_path 存相对 output_dir 的最终文件路径，
+                # part_paths 记录首个分片（相对路径）
                 recording = Recording(
                     room_id=room.id,
-                    file_path=final_path,
+                    file_path=self._rel(final_path),
                     file_name=os.path.basename(final_path),
                     format=fmt,
                     status="recording",
-                    started_at=datetime.now(),
+                    started_at=utcnow(),
                     part_paths=json.dumps([self._rel(result["file_path"])]),
                 )
                 session.add(recording)
@@ -401,7 +433,8 @@ class LiveMonitor:
             fmt = recording.format
 
             # 由最终文件路径反推 base 与目录，生成下一个 part 目标
-            final_path = recording.file_path
+            # （DB 存相对路径，历史数据可能为绝对路径，join 对两者都正确）
+            final_path = os.path.join(settings.output_dir, recording.file_path or "")
             dir_path = os.path.dirname(final_path)
             base = os.path.basename(final_path)
             if "." in base:
@@ -468,7 +501,7 @@ class LiveMonitor:
                 await session.commit()
             return
 
-        final_path = recording.file_path
+        final_path = os.path.join(settings.output_dir, recording.file_path or "")
         parts_rel = json.loads(recording.part_paths or "[]") or []
         files = self._expand_parts(parts_rel)
 
@@ -501,14 +534,14 @@ class LiveMonitor:
                 logger.error(f"房间 {room.id} 合并碎片失败: {merged.get('error')}")
 
         size = os.path.getsize(final_path) if os.path.exists(final_path) else 0
-        now = datetime.now()
+        now = utcnow()
         duration = (now - recording.started_at).total_seconds() if recording.started_at else 0
 
         async with async_session() as session:
             await session.execute(
                 update(Recording).where(Recording.id == recording.id).values(
                     status="completed",
-                    file_path=final_path,
+                    file_path=self._rel(final_path),
                     file_name=os.path.basename(final_path),
                     file_size=size,
                     duration=duration,
@@ -554,10 +587,19 @@ class LiveMonitor:
                 ).order_by(Recording.started_at)
             )).scalars().all()
 
-        day = [r for r in rows if r.file_path and os.path.dirname(r.file_path) == dir_path]
+        # file_path 统一按相对路径解读（历史绝对路径数据 join 后原样保留），
+        # 再用绝对路径与 dir_path 比对——此前直接比较导致已合并记录（相对路径）
+        # 匹配不上，当天第三次及以后的开播不再参与二次合并
+        target_dir = os.path.abspath(dir_path)
+
+        def _abs(fp: str) -> str:
+            return os.path.abspath(os.path.join(settings.output_dir, fp))
+
+        day = [r for r in rows
+               if r.file_path and os.path.dirname(_abs(r.file_path)) == target_dir]
         if len(day) < 2:
             return
-        files = [os.path.join(settings.output_dir, r.file_path) for r in day]
+        files = [_abs(r.file_path) for r in day]
         files = [f for f in files if os.path.isfile(f)]
         if len(files) < 2:
             return
@@ -598,7 +640,7 @@ class LiveMonitor:
         os.replace(tmp_out, final_abs)
 
         size = os.path.getsize(final_abs)
-        now = datetime.now()
+        now = utcnow()
         keep = day[0]
         duration_sum = sum(r.duration or 0 for r in day)
         ended = max([r.ended_at for r in day if r.ended_at], default=now)
@@ -625,7 +667,7 @@ class LiveMonitor:
                 os.remove(f)
             except OSError:
                 pass
-        file_manager._invalidate("file_list")
+        file_manager.invalidate_cache("file_list")
         logger.info(
             f"房间 {room_id} 当日合并完成: {final_name} "
             f"({round(size / 1024 ** 3, 2)}GB, {len(files)} 段)"
@@ -699,7 +741,6 @@ class LiveMonitor:
             return
 
         try:
-            import httpx
             async with httpx.AsyncClient() as client:
                 await client.post(settings.webhook_url, json={"text": message}, timeout=10)
         except Exception as e:

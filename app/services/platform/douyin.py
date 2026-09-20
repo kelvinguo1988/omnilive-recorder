@@ -235,10 +235,6 @@ class DouyinPlatform(BasePlatform):
             if hls_url:
                 return hls_url
 
-            hls_pull_data = stream_url_data.get("hls_pull_url_params", "")
-            if hls_pull_data and hls_url:
-                return f"{hls_url}?{hls_pull_data}"
-
             flv_pull_data = stream_url_data.get("flv_pull_url", {})
             if flv_pull_data:
                 for key, value in flv_pull_data.items():

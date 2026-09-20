@@ -28,8 +28,8 @@ async def list_files(platform: str = None, streamer: str = None):
 
 @router.get("/streamers")
 async def list_streamers():
-    """获取主播列表（按文件统计）"""
-    return file_manager.get_streamers()
+    """获取主播列表（按文件统计，全盘 os.walk 放线程池避免阻塞事件循环）"""
+    return await asyncio.to_thread(file_manager.get_streamers)
 
 
 @router.get("/download/{file_path:path}")
