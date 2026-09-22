@@ -4,6 +4,7 @@ import os
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+from app.services import archive
 from app.services.file_manager import file_manager
 
 router = APIRouter(prefix="/api/files", tags=["files"])
@@ -21,15 +22,18 @@ class BatchDeleteRequest(BaseModel):
 @router.get("")
 async def list_files(platform: str = None, streamer: str = None):
     """获取文件列表（os.walk 全量遍历放线程池，避免大目录阻塞事件循环）"""
+    platform_map = await archive.folder_platform_map()
     return await asyncio.to_thread(
-        file_manager.get_file_list, platform=platform, streamer=streamer
+        file_manager.get_file_list, platform=platform, streamer=streamer,
+        platform_map=platform_map,
     )
 
 
 @router.get("/streamers")
 async def list_streamers():
-    """获取主播列表（按文件统计，全盘 os.walk 放线程池避免阻塞事件循环）"""
-    return await asyncio.to_thread(file_manager.get_streamers)
+    """按主播汇总归档情况（直播/作品分栏统计，全盘 os.walk 放线程池）"""
+    platform_map = await archive.folder_platform_map()
+    return await asyncio.to_thread(file_manager.get_streamers, platform_map=platform_map)
 
 
 @router.get("/download/{file_path:path}")

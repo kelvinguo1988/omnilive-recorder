@@ -371,3 +371,56 @@ body {
 /* 复选框列 */
 .col-check { width: 40px; text-align: center; }
 .col-check input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; accent-color: var(--accent); }
+
+/* 文件管理：按主播归档分组的卡片 */
+.file-groups { display: flex; flex-direction: column; gap: 12px; }
+.file-groups-toolbar { justify-content: flex-end; margin: -8px 0 8px; }
+.select-all { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-secondary); }
+.select-all input { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
+.streamer-card { padding: 0; }
+.streamer-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border-color);
+}
+.streamer-card .streamer-head:last-child { border-bottom: none; }
+.streamer-head input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; accent-color: var(--accent); }
+.streamer-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: none;
+    border: none;
+    color: var(--text-primary);
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    padding: 0;
+}
+.streamer-caret { color: var(--text-tertiary); font-size: 11px; transition: transform .15s; display: inline-block; }
+.streamer-head.open .streamer-caret { transform: rotate(90deg); }
+.streamer-meta { margin-left: auto; font-size: 12px; color: var(--text-tertiary); white-space: nowrap; }
+.streamer-body { padding: 10px 16px 14px; }
+.archive-col + .archive-col { margin-top: 16px; }
+.archive-col h4 {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin-bottom: 4px;
+}
+.archive-col h4 small { font-weight: 400; color: var(--text-tertiary); font-size: 12px; }
+.archive-table th { display: none; }
+.file-loc {
+    display: inline-block;
+    margin-right: 8px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: var(--bg-tertiary);
+    color: var(--text-tertiary);
+    font-size: 12px;
+}

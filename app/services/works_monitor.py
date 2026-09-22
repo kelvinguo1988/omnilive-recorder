@@ -28,6 +28,7 @@ from app.models import Room, Work
 from app.config import settings
 from app.utils import utcnow
 from app.services.platform.base import WorkInfo, WORKS_UA, PLATFORM_CN
+from app.services import archive
 from app.services.platform_manager import platform_manager
 from app.services.file_manager import file_manager
 from app.services.recorder import recorder
@@ -103,11 +104,7 @@ class WorksMonitor:
         文件名约定（_download_work 生成）：{YYYYMMDD}_{标题}_{作品ID}.{扩展名}，
         作品ID 取文件名主干末段（rsplit 防标题含下划线）。
         """
-        dir_path = os.path.join(
-            settings.output_dir, "works",
-            PLATFORM_CN.get(room.platform, room.platform),
-            recorder._sanitize_filename(room.streamer_name or room.platform_user_id),
-        )
+        dir_path = archive.works_root(room)
         index = {}
         if not os.path.isdir(dir_path):
             return index
@@ -123,11 +120,7 @@ class WorksMonitor:
 
     def _cleanup_part_files(self, room: Room):
         """删除主播作品目录下的 .part 半成品（下载中断残留，无完整数据）"""
-        dir_path = os.path.join(
-            settings.output_dir, "works",
-            PLATFORM_CN.get(room.platform, room.platform),
-            recorder._sanitize_filename(room.streamer_name or room.platform_user_id),
-        )
+        dir_path = archive.works_root(room)
         if not os.path.isdir(dir_path):
             return
         for name in os.listdir(dir_path):
@@ -510,6 +503,10 @@ class WorksMonitor:
             await session.execute(
                 update(Work).where(Work.id == work.id).values(status="downloading")
             )
+            row = await session.get(Room, room.id)
+            if row:
+                await archive.sync_folder_name(session, row)
+                room.folder_name = row.folder_name
             await session.commit()
 
         # 解析直链：优先列表时缓存的地址，否则二次解析（B站）
@@ -526,11 +523,7 @@ class WorksMonitor:
         if not urls:
             raise RuntimeError("未能获取下载地址（可能被风控或作品已删除）")
 
-        dir_path = os.path.join(
-            settings.output_dir, "works",
-            PLATFORM_CN.get(room.platform, room.platform),
-            recorder._sanitize_filename(room.streamer_name or room.platform_user_id),
-        )
+        dir_path = archive.works_root(room)
         os.makedirs(dir_path, exist_ok=True)
 
         date_str = work.publish_time.strftime("%Y%m%d") if work.publish_time else \

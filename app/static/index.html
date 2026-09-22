@@ -267,29 +267,21 @@
                         <option value="ts">合并为 TS</option>
                     </select>
                     <button class="btn btn-primary" onclick="loadFiles()">刷新</button>
+                    <button class="btn btn-secondary" onclick="expandAllStreamers(true)">展开全部</button>
+                    <button class="btn btn-secondary" onclick="expandAllStreamers(false)">折叠全部</button>
                     <button class="btn btn-secondary" onclick="mergeSelected()" id="mergeBtn" disabled>合并选中 (<span id="selCount">0</span>)</button>
                     <button class="btn btn-danger" onclick="deleteSelected()" id="delBtn" disabled>批量删除 (<span id="delCount">0</span>)</button>
                 </div>
             </header>
-            <div class="card">
-                <div class="card-body">
-                    <table class="data-table" id="filesTable">
-                        <thead>
-                            <tr>
-                                <th class="col-check"><input type="checkbox" id="selectAll" onchange="toggleSelectAll(this)" title="全选"></th>
-                                <th>文件名</th>
-                                <th>平台</th>
-                                <th>主播</th>
-                                <th>大小</th>
-                                <th>修改时间</th>
-                                <th>操作</th>
-                            </tr>
-                        </thead>
-                        <tbody id="filesTableBody">
-                            <tr><td colspan="7" class="empty-state">加载中...</td></tr>
-                        </tbody>
-                    </table>
-                </div>
+            <div class="file-toolbar file-groups-toolbar">
+                <label class="select-all">
+                    <input type="checkbox" id="selectAll" onchange="toggleSelectAll(this)" title="全选本页所有文件">
+                    <span>全选</span>
+                </label>
+            </div>
+            <!-- 按主播分组的归档卡片：每张卡片内分「直播间」「作品」两栏 -->
+            <div id="filesGroups" class="file-groups">
+                <div class="card"><div class="empty-state">加载中...</div></div>
             </div>
         </div>
 

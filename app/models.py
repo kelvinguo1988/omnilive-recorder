@@ -30,6 +30,7 @@ class Room(Base):
     last_work_check_time = Column(DateTime, nullable=True, comment="最后作品检查时间")
     title = Column(String(200), nullable=True, comment="直播标题")
     streamer_name = Column(String(100), nullable=True, comment="主播名称")
+    folder_name = Column(String(150), nullable=True, comment="归档目录名(分配后固定,改名不漂移)")
     quality = Column(String(50), default="origin", comment="录制画质")
     enabled = Column(Boolean, default=True, comment="是否启用（直播监控+作品订阅总开关）")
     is_live = Column(Boolean, default=False, comment="是否正在直播")

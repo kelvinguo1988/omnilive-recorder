@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Optional
 from fastapi import HTTPException
 from app.config import settings
+from app.services import archive
 
 logger = logging.getLogger(__name__)
 
@@ -54,9 +55,35 @@ class FileManager:
         except OSError:
             return False
 
-    def get_file_list(self, platform: str = None, streamer: str = None) -> list:
-        """获取文件列表（带 TTL 缓存，P1-5）"""
+    def _classify(self, rel_path: str) -> tuple:
+        """相对路径 -> (归档目录名, 归类 live/works/other, 平台中文或空)
+
+        新布局为 {主播}/直播间|作品/...，平台不再出现在路径里，由调用方按
+        Room.folder_name 映射补齐；旧布局（平台/主播/日期、works/平台/主播）
+        在未完成迁移的存量库里仍会读到，这里兼容识别。
+        """
+        parts = rel_path.split(os.sep)
+        if len(parts) >= 2 and parts[1] == archive.LIVE_SUBDIR:
+            return parts[0], "live", ""
+        if len(parts) >= 2 and parts[1] == archive.WORKS_SUBDIR:
+            return parts[0], "works", ""
+        if parts[0] == archive.LEGACY_WORKS_ROOT and len(parts) >= 4:
+            return parts[2], "works", parts[1]
+        if parts[0] in archive._CN_PLATFORMS and len(parts) >= 2:
+            return parts[1], "live", parts[0]
+        return "", "other", ""
+
+    def get_file_list(self, platform: str = None, streamer: str = None,
+                      platform_map: dict = None) -> list:
+        """获取文件列表（带 TTL 缓存，P1-5）
+
+        platform_map: {归档目录名: 平台中文}，新布局的文件靠它补出平台字段。
+        """
         full = self._get_all_files_cached()
+        if platform_map is not None:
+            for f in full:
+                if not f["platform"]:
+                    f["platform"] = platform_map.get(f["streamer"], "")
         if platform is None and streamer is None:
             return full
         return [
@@ -82,24 +109,17 @@ class FileManager:
 
                 file_path = os.path.join(root, f)
                 rel_path = os.path.relpath(file_path, base_path)
-
-                parts = rel_path.split(os.sep)
-                # 作品文件路径为 works/{平台}/{主播名}/文件（顶层是 works 保留目录），
-                # 直播录制为 {平台}/{主播名}/{日期}/文件，解析时区分两种布局
-                if parts[0] == "works" and len(parts) > 3:
-                    file_platform = parts[1]
-                    file_streamer = parts[2]
-                else:
-                    file_platform = parts[0] if len(parts) > 0 else ""
-                    file_streamer = parts[1] if len(parts) > 1 else ""
+                streamer, category, plat = self._classify(rel_path)
 
                 stat = os.stat(file_path)
                 result.append({
                     "name": f,
                     "path": rel_path,
                     "full_path": file_path,
-                    "platform": file_platform,
-                    "streamer": file_streamer,
+                    "platform": plat,
+                    "streamer": streamer,
+                    "category": category,
+                    "sub_dir": os.path.dirname(rel_path).replace(os.sep, "/"),
                     "size": stat.st_size,
                     "size_mb": round(stat.st_size / 1024 / 1024, 2),
                     "modified_time": stat.st_mtime,
@@ -182,49 +202,40 @@ class FileManager:
             logger.error(f"获取磁盘使用情况失败: {e}")
             return {}
 
-    def get_streamers(self) -> list:
-        """获取所有主播列表（兼容直播与作品两种目录布局）"""
+    def get_streamers(self, platform_map: dict = None) -> list:
+        """按主播汇总归档情况（复用文件列表缓存，不再走第二遍 os.walk）"""
+        agg = {}
+        for f in self.get_file_list(platform_map=platform_map):
+            key = f["streamer"] or "未归档"
+            a = agg.setdefault(key, {
+                "streamer": key,
+                "platform": f["platform"],
+                "file_count": 0,
+                "live_count": 0,
+                "live_size_mb": 0.0,
+                "works_count": 0,
+                "works_size_mb": 0.0,
+                "total_size_mb": 0.0,
+                "last_modified": 0,
+            })
+            if not a["platform"] and f["platform"]:
+                a["platform"] = f["platform"]
+            a["file_count"] += 1
+            a["total_size_mb"] += f["size_mb"]
+            if f["category"] == "works":
+                a["works_count"] += 1
+                a["works_size_mb"] += f["size_mb"]
+            elif f["category"] == "live":
+                a["live_count"] += 1
+                a["live_size_mb"] += f["size_mb"]
+            a["last_modified"] = max(a["last_modified"], f["modified_time"])
+
         result = []
-        base_path = Path(self.output_dir)
-
-        if not base_path.exists():
-            return result
-
-        def _stat_streamer(platform: str, streamer_dir: Path):
-            total_size = 0
-            file_count = 0
-            for root, dirs, files in os.walk(streamer_dir):
-                for f in files:
-                    if not f.startswith("."):
-                        total_size += os.path.getsize(os.path.join(root, f))
-                        file_count += 1
-            if file_count > 0:
-                result.append({
-                    "platform": platform,
-                    "streamer": streamer_dir.name,
-                    "file_count": file_count,
-                    "total_size_mb": round(total_size / 1024 / 1024, 2),
-                    "total_size_gb": round(total_size / 1024 / 1024 / 1024, 2),
-                })
-
-        for platform_dir in base_path.iterdir():
-            if not platform_dir.is_dir():
-                continue
-            if platform_dir.name == "works":
-                # 作品布局: works/{平台}/{主播名}/文件 —— 多套一层
-                for works_platform in platform_dir.iterdir():
-                    if not works_platform.is_dir():
-                        continue
-                    for streamer_dir in works_platform.iterdir():
-                        if streamer_dir.is_dir():
-                            _stat_streamer(works_platform.name, streamer_dir)
-                continue
-            if platform_dir.name in ("merged",):
-                # 手动合并产物的历史落点目录，不按平台/主播统计
-                continue
-            for streamer_dir in platform_dir.iterdir():
-                if streamer_dir.is_dir():
-                    _stat_streamer(platform_dir.name, streamer_dir)
+        for a in agg.values():
+            for k in ("total_size_mb", "live_size_mb", "works_size_mb"):
+                a[k] = round(a[k], 2)
+            a["total_size_gb"] = round(a["total_size_mb"] / 1024, 2)
+            result.append(a)
 
         result.sort(key=lambda x: x["total_size_mb"], reverse=True)
         return result
@@ -238,7 +249,8 @@ class FileManager:
         返回 {success, output_path, output_name, output_rel, file_size, file_size_mb, input_count}
 
         :param output_path: 可选，合并结果的绝对/相对输出路径。传入时合并到该路径
-            （保持「平台/主播/日期」目录结构与命名，P0-1）；不传则落到 ``merged/`` 目录。
+            （日合并按原「主播/直播间/日期」结构与命名回写，P0-1）；
+            不传则合并到首个输入文件所在目录。
         """
         if not file_paths or len(file_paths) < 2:
             return {"success": False, "error": "至少需要 2 个文件才能合并"}
@@ -272,10 +284,11 @@ class FileManager:
                 out_name = f"{out_name}.{fmt}"
                 out_path = os.path.join(out_dir, out_name)
         else:
-            merged_dir = os.path.join(base_path, "merged")
-            os.makedirs(merged_dir, exist_ok=True)
+            # 合并产物落在首个输入文件所在目录（新布局即 {主播}/直播间/{日期}），
+            # 与碎片同归档，不会掉进无主目录导致文件管理里归到「未归档」
+            out_dir = os.path.dirname(abs_paths[0])
             out_name = f"merged_{ts}.{fmt}"
-            out_path = os.path.join(merged_dir, out_name)
+            out_path = os.path.join(out_dir, out_name)
 
         # 写 ffmpeg concat 列表文件（放在输出文件同目录，避免跨目录权限问题）
         list_path = os.path.join(os.path.dirname(out_path), f"_list_{ts}.txt")

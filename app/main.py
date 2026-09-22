@@ -10,6 +10,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from app.database import init_db
 from app.config import settings
 from app.routers import rooms, recordings, system, files, works
+from app.services.archive import migrate_legacy_layout
 from app.services.monitor import monitor
 from app.services.works_monitor import works_monitor
 from app.services.sync_service import sync_service
@@ -78,6 +79,10 @@ async def lifespan(app: FastAPI):
     await init_db()
     logger.info("数据库初始化完成")
     _check_persistent_mounts()
+
+    # 存量归档：把旧布局（平台/主播/日期、works/平台/主播）的文件搬进 主播/{直播间,作品}
+    # 并回写 DB 路径。必须在各监控启动前完成，后续写入才会用新目录。
+    await migrate_legacy_layout()
 
     await monitor.start()
     logger.info("监控调度器已启动")

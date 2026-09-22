@@ -423,25 +423,25 @@ async function loadRecordings() {
     }
 }
 
-// 文件管理
-async function loadFiles() {
-    try {
-        const platform = document.getElementById('filePlatformFilter')?.value || '';
-        const url = '/api/files' + (platform ? `?platform=${platform}` : '');
-        const files = await API.get(url);
-        const tbody = document.getElementById('filesTableBody');
+// 文件管理：按主播分组的归档卡片（卡片内分「直播间」「作品」两栏）
+const ARCHIVE_COLS = { live: '直播间', works: '作品' };
+const PLATFORM_KEYS = Object.fromEntries(Object.entries(PLATFORM_NAMES).map(([k, v]) => [v, k]));
+// 折叠状态跨刷新保留（键为主播名）
+const openStreamers = new Set();
 
-        if (files.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="7" class="empty-state">暂无录制文件</td></tr>';
-            return;
-        }
+function _locLabel(f) {
+    // 直播录像的日期层级、旧布局的平台层级，作为文件名前的浅色定位
+    const segs = (f.sub_dir || '').split('/').filter(Boolean);
+    return segs.filter(s => s !== f.streamer && s !== ARCHIVE_COLS.live && s !== ARCHIVE_COLS.works
+        && s !== 'works').join('/');
+}
 
-        tbody.innerHTML = files.map(f => `
+function _fileRow(f) {
+    const loc = _locLabel(f);
+    return `
             <tr>
                 <td class="col-check"><input type="checkbox" class="file-check" data-path="${escapeHtml(f.path)}" onchange="updateMergeBtn()"></td>
-                <td title="${escapeHtml(f.name)}">${escapeHtml(f.name.length > 35 ? f.name.substring(0, 35) + '...' : f.name)}</td>
-                <td><span class="platform-tag">${escapeHtml(f.platform)}</span></td>
-                <td>${escapeHtml(f.streamer || '-')}</td>
+                <td title="${escapeHtml(f.path)}">${loc ? `<span class="file-loc">${escapeHtml(loc)}</span>` : ''}${escapeHtml(f.name.length > 35 ? f.name.substring(0, 35) + '...' : f.name)}</td>
                 <td>${formatSize(f.size_mb)}</td>
                 <td>${formatTime(new Date(f.modified_time * 1000).toISOString())}</td>
                 <td>
@@ -451,16 +451,110 @@ async function loadFiles() {
                         <button class="btn btn-sm btn-danger" data-act="delete" data-path="${escapeHtml(f.path)}">删除</button>
                     </div>
                 </td>
-            </tr>
-        `).join('');
+            </tr>`;
+}
 
-        // 重置选择状态
+function _sectionHtml(category, list) {
+    if (!list.length) return '';
+    const totalMb = list.reduce((s, f) => s + f.size_mb, 0);
+    return `
+        <section class="archive-col">
+            <h4>${ARCHIVE_COLS[category] || '其他'}<small>${list.length} 个 · ${formatSize(totalMb)}</small></h4>
+            <table class="data-table archive-table">
+                <tbody>
+                    ${list.map(_fileRow).join('')}
+                </tbody>
+            </table>
+        </section>`;
+}
+
+async function loadFiles() {
+    try {
+        const platform = document.getElementById('filePlatformFilter')?.value || '';
+        const url = '/api/files' + (platform ? `?platform=${encodeURIComponent(platform)}` : '');
+        const files = await API.get(url);
+        const box = document.getElementById('filesGroups');
         const selAll = document.getElementById('selectAll');
         if (selAll) selAll.checked = false;
+
+        if (!files.length) {
+            box.innerHTML = '<div class="card"><div class="empty-state">暂无录制文件</div></div>';
+            updateMergeBtn();
+            return;
+        }
+
+        const groups = new Map();
+        for (const f of files) {
+            const name = f.streamer || '未归档';
+            if (!groups.has(name)) {
+                groups.set(name, { name, platform: f.platform || '', live: [], works: [], other: [] });
+            }
+            const g = groups.get(name);
+            if (!g.platform && f.platform) g.platform = f.platform;
+            (g[f.category] || g.other).push(f);
+        }
+        // 卡片按各主播最后写入时间倒序，最近录制的排在最前
+        const lastOf = g => Math.max(0, ...g.live.concat(g.works, g.other).map(f => f.modified_time));
+        const list = [...groups.values()].sort((a, b) => lastOf(b) - lastOf(a));
+
+        box.innerHTML = list.map((g, idx) => {
+            const all = g.live.concat(g.works, g.other);
+            const platKey = PLATFORM_KEYS[g.platform];
+            const open = openStreamers.has(g.name);
+            return `
+        <div class="card streamer-card">
+            <div class="streamer-head${open ? ' open' : ''}">
+                <input type="checkbox" class="streamer-check"
+                       onchange="selectGroup(${idx}, this.checked)" title="选中该主播全部文件">
+                <button class="streamer-toggle" onclick="toggleStreamer(${idx})">
+                    <span class="streamer-caret">▶</span>
+                    <span class="streamer-name">${escapeHtml(g.name)}</span>
+                </button>
+                ${g.platform ? `<span class="platform-tag ${platKey ? PLATFORM_TAGS[platKey] : ''}">${escapeHtml(g.platform)}</span>` : ''}
+                <span class="streamer-meta">
+                    直播间 ${g.live.length} · 作品 ${g.works.length} · ${formatSize(all.reduce((s, f) => s + f.size_mb, 0))}
+                    · 更新于 ${formatTime(new Date(lastOf(g) * 1000).toISOString())}
+                </span>
+            </div>
+            <div class="streamer-body" id="sbody-${idx}" data-key="${escapeHtml(g.name)}" style="${open ? '' : 'display:none'}">
+                ${_sectionHtml('live', g.live)}
+                ${_sectionHtml('works', g.works)}
+                ${_sectionHtml('other', g.other)}
+            </div>
+        </div>`;
+        }).join('');
+
         updateMergeBtn();
     } catch (e) {
         console.error('Load files error:', e);
     }
+}
+
+function toggleStreamer(idx) {
+    const body = document.getElementById('sbody-' + idx);
+    if (!body) return;
+    const head = body.previousElementSibling;
+    const open = body.style.display === 'none';
+    body.style.display = open ? '' : 'none';
+    if (head) head.classList.toggle('open', open);
+    if (open) openStreamers.add(body.dataset.key);
+    else openStreamers.delete(body.dataset.key);
+}
+
+function expandAllStreamers(open) {
+    document.querySelectorAll('.streamer-body').forEach(body => {
+        body.style.display = open ? '' : 'none';
+        if (body.previousElementSibling) body.previousElementSibling.classList.toggle('open', open);
+        if (open) openStreamers.add(body.dataset.key);
+        else openStreamers.delete(body.dataset.key);
+    });
+}
+
+function selectGroup(idx, checked) {
+    const body = document.getElementById('sbody-' + idx);
+    if (!body) return;
+    body.querySelectorAll('.file-check').forEach(c => { c.checked = checked; });
+    updateMergeBtn();
 }
 
 function playFile(path) {
@@ -500,6 +594,16 @@ function updateMergeBtn() {
     if (delCountEl) delCountEl.textContent = checked.length;
     const delBtn = document.getElementById('delBtn');
     if (delBtn) delBtn.disabled = checked.length < 1;
+
+    // 同步每个主播卡片的勾选框（部分选中显示为半选态）
+    document.querySelectorAll('.streamer-card').forEach(card => {
+        const group = card.querySelector('.streamer-check');
+        const items = card.querySelectorAll('.file-check');
+        if (!group || !items.length) return;
+        const n = card.querySelectorAll('.file-check:checked').length;
+        group.checked = n === items.length;
+        group.indeterminate = n > 0 && n < items.length;
+    });
 }
 
 // 批量删除选中文件
@@ -943,10 +1047,10 @@ document.addEventListener('DOMContentLoaded', () => {
         if (currentPage === 'dashboard') refreshDashboard();
     }, 15000);
 
-    // 文件表格操作按钮：事件委托（路径含引号时内联 onclick 字符串拼接会被破坏）
-    const filesBody = document.getElementById('filesTableBody');
-    if (filesBody) {
-        filesBody.addEventListener('click', (e) => {
+    // 文件卡片操作按钮：事件委托（路径含引号时内联 onclick 字符串拼接会被破坏）
+    const filesBox = document.getElementById('filesGroups');
+    if (filesBox) {
+        filesBox.addEventListener('click', (e) => {
             const btn = e.target.closest('button[data-act]');
             if (!btn) return;
             const p = btn.dataset.path || '';
@@ -955,7 +1059,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // 作品表格播放按钮（文件位于 output_dir/works 下，复用文件播放接口）
+    // 作品表格播放按钮（文件位于 主播/作品/ 下，复用文件播放接口）
     const worksBody = document.getElementById('worksTableBody');
     if (worksBody) {
         worksBody.addEventListener('click', (e) => {

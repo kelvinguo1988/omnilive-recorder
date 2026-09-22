@@ -22,7 +22,7 @@ from sqlalchemy import select
 from app.database import async_session
 from app.models import Room, Recording, Work
 from app.config import settings
-from app.services.recorder import recorder
+from app.services import archive
 from app.services.platform.base import PLATFORM_CN
 
 logger = logging.getLogger(__name__)
@@ -128,9 +128,9 @@ class SyncService:
 
     @staticmethod
     def _streamer_dir(root: str, room: Room) -> str:
-        """{同步根}/{主播名}：主播名清洗非法字符，空则回退平台用户ID/主播ID"""
-        name = room.streamer_name or room.platform_user_id or f"主播{room.id}"
-        return os.path.join(root, recorder._sanitize_filename(name))
+        """{同步根}/{归档目录名}：与本地 recordings 用同一个主播目录名，
+        避免主播改名后同步侧又拆出一份"""
+        return os.path.join(root, archive.folder_of(room))
 
     @staticmethod
     def _copy_if_needed(src: str, dst: str) -> tuple:

@@ -70,35 +70,14 @@ class FFmpegRecorder:
         base = self._sanitize_filename(base)
         return base or "untitled"
 
-    def _get_output_path(self, platform: str, streamer_name: str, room_id: str,
-                         record_format: str = None, template: str = None,
-                         title: str = None, remark: str = None) -> tuple[str, str]:
-        """获取输出文件路径（自动命名，用于未显式指定 output_path 时的兜底）"""
-        fmt = record_format or settings.record_format
-        now = datetime.now()
-        date_str = now.strftime("%Y-%m-%d")
-
-        streamer = self._sanitize_filename(streamer_name) or room_id
-        platform_cn = {
-            "douyin": "抖音",
-            "bilibili": "B站",
-            "kuaishou": "快手",
-        }.get(platform, platform)
-
-        dir_path = os.path.join(settings.output_dir, platform_cn, streamer, date_str)
-        os.makedirs(dir_path, exist_ok=True)
-
-        base = self._build_base_name(platform, streamer_name, room_id, template=template, title=title, remark=remark)
-        filename = f"{base}.{fmt}"
-        file_path = os.path.join(dir_path, filename)
-
-        return dir_path, file_path
-
     def build_session_target(self, platform: str, streamer_name: str, room_id: str,
-                             part_index: int = 1, record_format: str = None,
-                             segment_time: int = None, template: str = None,
-                             title: str = None, remark: str = None) -> tuple[str, str]:
+                             base_dir: str, part_index: int = 1,
+                             record_format: str = None, segment_time: int = None,
+                             template: str = None, title: str = None,
+                             remark: str = None) -> tuple[str, str]:
         """为一场所录制的某个 part 计算输出路径。
+
+        base_dir 为该主播的直播间归档目录（archive.live_root），日期层由本方法追加。
 
         返回 (final_path, part_target)：
         - final_path: 整场录制的最终文件（{base}.{fmt}），断流重连后由所有 part 合并得到。
@@ -110,17 +89,7 @@ class FFmpegRecorder:
         fmt = record_format or settings.record_format
         seg = segment_time if segment_time is not None else settings.segment_time
 
-        now = datetime.now()
-        date_str = now.strftime("%Y-%m-%d")
-
-        streamer = self._sanitize_filename(streamer_name) or room_id
-        platform_cn = {
-            "douyin": "抖音",
-            "bilibili": "B站",
-            "kuaishou": "快手",
-        }.get(platform, platform)
-
-        dir_path = os.path.join(settings.output_dir, platform_cn, streamer, date_str)
+        dir_path = os.path.join(base_dir, datetime.now().strftime("%Y-%m-%d"))
         os.makedirs(dir_path, exist_ok=True)
 
         base = self._build_base_name(platform, streamer_name, room_id, template=template, title=title, remark=remark)
@@ -198,28 +167,18 @@ class FFmpegRecorder:
 
     async def start_recording(self, room_db_id: int, stream_url: str,
                               platform: str, streamer_name: str,
-                              room_id: str, record_format: str = None,
-                              output_path: str = None,
+                              room_id: str, output_path: str,
+                              record_format: str = None,
                               segment_time: int = None) -> dict:
-        """开始录制。
-
-        output_path 指定时写入该路径（用于断流重连续写同一场的某个 part），
-        否则按默认命名自动生成（开播 / 手动开始时用于首个 part）。
-        """
+        """开始录制，写入 output_path（由 build_session_target 计算的归档路径）。"""
         async with self._lock:
             if room_db_id in self.active_processes:
                 logger.warning(f"房间 {room_db_id} 已在录制中")
                 return {"success": False, "error": "已在录制中"}
 
-        if output_path is None:
-            dir_path, file_path = self._get_output_path(
-                platform, streamer_name, room_id, record_format
-            )
-            seg_time = segment_time if segment_time is not None else settings.segment_time
-        else:
-            file_path = output_path
-            dir_path = os.path.dirname(output_path)
-            seg_time = segment_time if segment_time is not None else settings.segment_time
+        file_path = output_path
+        dir_path = os.path.dirname(output_path)
+        seg_time = segment_time if segment_time is not None else settings.segment_time
 
         cmd = self._build_ffmpeg_command(stream_url, file_path, segment_time=seg_time, record_format=record_format)
         logger.info(f"开始录制 房间{room_db_id}: {' '.join(cmd[:6])}... 输出: {file_path}")

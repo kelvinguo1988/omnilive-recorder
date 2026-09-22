@@ -12,6 +12,7 @@ from app.models import Room, Recording, Work
 from app.config import settings
 from app.utils import iso
 from app.services.file_manager import file_manager
+from app.services import archive
 from app.services.platform import PlatformFactory
 from app.services.platform.base import PLATFORM_CN
 from app.services.monitor import monitor
@@ -185,6 +186,7 @@ async def create_room(room: RoomCreate, background_tasks: BackgroundTasks, db: A
     db.add(new_room)
     await db.commit()
     await db.refresh(new_room)
+    await archive.sync_folder_name(db, new_room)
 
     # 后台立即检查：有直播间地址则检测直播，有作品订阅则开始回填
     if url:
@@ -272,7 +274,7 @@ async def import_rooms(payload: RoomsImport, db: AsyncSession = Depends(get_db))
             continue
 
         try:
-            db.add(Room(
+            new_room = Room(
                 url=url,
                 home_url=home_url,
                 platform=platform,
@@ -283,8 +285,10 @@ async def import_rooms(payload: RoomsImport, db: AsyncSession = Depends(get_db))
                 works_enabled=bool(item.works_enabled) and bool(platform_user_id),
                 remark=item.remark,
                 streamer_name=item.streamer_name or None,
-            ))
+            )
+            db.add(new_room)
             await db.commit()
+            await archive.sync_folder_name(db, new_room)
             imported += 1
         except Exception as e:
             await db.rollback()
@@ -371,6 +375,10 @@ async def update_room(room_id: int, room: RoomUpdate, background_tasks: Backgrou
 
     await db.execute(update(Room).where(Room.id == room_id).values(**update_data))
     await db.commit()
+    # 改了主播名/备注：归档目录名跟随（该主播还没有落盘文件时才会真的改名）
+    if {"streamer_name", "remark"} & set(update_data):
+        await db.refresh(existing)
+        await archive.sync_folder_name(db, existing)
 
     # 编辑后立即后台重新检测一次，标题/状态/主播名无需等下个监控周期才刷新
     background_tasks.add_task(monitor.check_room_now, room_id)

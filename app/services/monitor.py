@@ -12,6 +12,7 @@ from app.database import async_session
 from app.models import Room, Recording, SystemLog
 from app.config import settings
 from app.utils import utcnow
+from app.services import archive
 from app.services.recorder import recorder
 from app.services.file_manager import file_manager
 from app.services.platform import RoomInfo
@@ -349,10 +350,17 @@ class LiveMonitor:
         # 主播名优先级：手动填写 > 平台探测 > 备注 > 房间ID。
         # 平台游客态常拿不到主播名，若不回退备注，文件名/目录会退化为纯房间号。
         streamer = room.streamer_name or info.streamer_name or room.remark or room.room_id
+        # 归档目录名在这里敲定：平台探测到的主播名只有这个时刻拿得到
+        async with async_session() as session:
+            row = await session.get(Room, room.id)
+            if row:
+                await archive.sync_folder_name(session, row, display=streamer)
+                room.folder_name = row.folder_name
         final_path, part_target = recorder.build_session_target(
             room.platform,
             streamer,
             room.room_id,
+            base_dir=archive.live_root(room),
             part_index=1,
             record_format=fmt,
             segment_time=settings.segment_time,
@@ -516,7 +524,7 @@ class LiveMonitor:
                     logger.error(f"移动单段文件失败: {e}")
         else:
             # 多 part：合并为单个最终文件后删除碎片（P0-1：合并目标用原计划路径，
-            # 保持「平台/主播/日期」目录结构与命名，避免落到 merged/ 导致无法追溯）
+            # 保持在「主播/直播间/日期」目录内与命名，避免落到无主目录导致无法追溯）
             merged = file_manager.merge_recordings(
                 [os.path.relpath(f, settings.output_dir) for f in files],
                 output_format=recording.format,
@@ -586,6 +594,7 @@ class LiveMonitor:
                     Recording.status == "completed",
                 ).order_by(Recording.started_at)
             )).scalars().all()
+            folder = await session.scalar(select(Room.folder_name).where(Room.id == room_id))
 
         # file_path 统一按相对路径解读（历史绝对路径数据 join 后原样保留），
         # 再用绝对路径与 dir_path 比对——此前直接比较导致已合并记录（相对路径）
@@ -613,8 +622,10 @@ class LiveMonitor:
             )
             return
 
-        # 命名取自目录结构（平台/主播/日期）：{主播名}_{YYYYMMDD}_合并.{fmt}
-        streamer_dir = os.path.basename(os.path.dirname(dir_path))
+        # 命名取归档目录名与日期目录：{主播}_{YYYYMMDD}_合并.{fmt}
+        # 主播名取自 Room.folder_name 而非目录层级——新布局是 主播/直播间/日期，
+        # 上一级目录恒为「直播间」，用路径反推会把合并文件叫「直播间_…」
+        streamer_dir = folder or os.path.basename(os.path.dirname(dir_path))
         date_compact = os.path.basename(dir_path).replace("-", "")
         final_name = f"{streamer_dir}_{date_compact}_合并.{fmt}"
         final_path = os.path.join(dir_path, final_name)
