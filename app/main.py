@@ -1,14 +1,16 @@
 """Live Recorder - 多平台直播录制平台"""
 import logging
 import os
+import shutil
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
-from app.database import init_db
-from app.config import settings
+from sqlalchemy import text
+from app.database import init_db, async_session
+from app.config import settings, get_data_dir
 from app.routers import rooms, recordings, system, files, works
 from app.services.archive import migrate_legacy_layout
 from app.services.monitor import monitor
@@ -45,12 +47,20 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
 
 def _check_persistent_mounts():
-    """启动自检：输出/同步目录必须是容器内挂载点（卷/bind mount）。
+    """启动自检：输出/同步/**数据**目录必须是容器内挂载点（卷/bind mount）。
 
     若用户在设置里把 output_dir/sync_root 改成未映射路径，数据会写进容器
     可写层——功能全部正常但重建容器即静默丢失。这里在启动时明确告警。
+
+    P1-24: 原自检只查 output_dir 与 sync_root，**漏了数据库所在的数据目录** ——
+    `./data` 若漏挂，SQLite 落容器可写层，重启即丢全部主播/录制记录/作品记录，
+    比丢录像更严重。数据目录必须一并检查。
     """
-    checks = [("录制输出目录", settings.output_dir)]
+    data_dir = get_data_dir(settings.database_url)
+    checks = [
+        ("录制输出目录", settings.output_dir),
+        ("数据目录(数据库)", data_dir),
+    ]
     if settings.sync_enabled and settings.sync_root:
         checks.append(("NAS 同步根目录", settings.sync_root))
     for label, path in checks:
@@ -153,5 +163,39 @@ async def index():
 
 @app.get("/api/health")
 async def health():
-    """健康检查"""
+    """健康检查（P1-24：真实探针，不再是静态常量）
+
+    原实现直接返回 {"status":"ok"}，不查 DB、不查 ffmpeg、不查后台 task 是否存活。
+    于是 ffmpeg 被管道阻塞、监控循环异常退出、DB 不可写时，容器仍报 healthy ——
+    编排层/QNAP UI 全绿但录制管线已死，restart: unless-stopped 也不会自愈。
+
+    这里做三项最小检查；任一项失败返回 503（Docker healthcheck 与 compose 依赖据此判定）。
+    """
+    problems = []
+
+    # 1) 数据库可读（SELECT 1，开销极小）
+    try:
+        async with async_session() as session:
+            await session.execute(text("SELECT 1"))
+    except Exception as e:
+        problems.append(f"数据库不可用: {e}")
+
+    # 2) ffmpeg 可执行（录制管线的唯一硬依赖）
+    if shutil.which("ffmpeg") is None:
+        problems.append("ffmpeg 不可执行（PATH 中找不到）")
+
+    # 3) 后台服务 task 存活（monitor / works_monitor / sync_service）
+    for name, task in (
+        ("直播监控", monitor._task),
+        ("作品监控", works_monitor._task),
+        ("NAS 同步", sync_service._task),
+    ):
+        if task is not None and task.done():
+            problems.append(f"{name}后台任务已退出")
+
+    if problems:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unhealthy", "service": "live-recorder", "problems": problems},
+        )
     return {"status": "ok", "service": "live-recorder"}

@@ -1,6 +1,6 @@
 """录制记录API"""
 import json
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
@@ -21,7 +21,14 @@ def _part_count(rec: Recording) -> int:
 
 @router.get("")
 async def list_recordings(skip: int = 0, limit: int = 50, db: AsyncSession = Depends(get_db)):
-    """获取录制记录列表"""
+    """获取录制记录列表
+
+    P2 修复：limit/skip 必须做上下界钳制。SQLite 把 `LIMIT -1` 解释为**无限制**，
+    原实现直接把 query 参数透传给 .limit()，于是 `?limit=-1` 会一次性返回全表
+    （已实测），大库上等于把整张表读进内存。这里钳到 [1, 500]。
+    """
+    skip = max(skip, 0)
+    limit = max(1, min(limit, 500))
     result = await db.execute(
         select(Recording, Room)
         .join(Room, Recording.room_id == Room.id)

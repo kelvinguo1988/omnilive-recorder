@@ -65,6 +65,30 @@ def _extract_platform_user_id(platform: str, home_url: str) -> str:
     return cls.extract_user_id(home_url) if cls and home_url else ""
 
 
+# P0-11: 平台名必须走白名单。原实现直接
+# `PlatformFactory.get_platform_class(platform).extract_room_id(url)` ——
+# get_platform_class 对未注册平台返回 None，随即 AttributeError → 500。
+# 已复现：POST /api/rooms {"platform":"youtube"} 直接 500 Internal Server Error。
+def _validate_platform(platform: str) -> str:
+    """校验平台名是否为已注册适配器，返回规范化平台名；非法则 400"""
+    name = (platform or "").strip()
+    if not name or PlatformFactory.get_platform_class(name) is None:
+        supported = "/".join(PlatformFactory.get_all_platforms())
+        raise HTTPException(
+            status_code=400,
+            detail=f"不支持的平台: {name or '(空)'}，可选值: {supported}",
+        )
+    return name
+
+
+def _extract_room_id(platform: str, url: str) -> str:
+    """安全提取房间ID（平台已校验，仍防御式处理 None）"""
+    cls = PlatformFactory.get_platform_class(platform)
+    if cls is None or not url:
+        return ""
+    return cls.extract_room_id(url) or ""
+
+
 async def _find_duplicate(db: AsyncSession, platform: str, url: str,
                           home_url: str, platform_user_id: str):
     """同平台查重：直播间地址/主页地址/平台用户ID 任一相同即为同一主播。
@@ -165,17 +189,23 @@ async def create_room(room: RoomCreate, background_tasks: BackgroundTasks, db: A
                     break
     if not platform:
         raise HTTPException(status_code=400, detail="无法识别平台，请手动指定平台(douyin/bilibili/kuaishou)")
+    # P0-11: 白名单校验（未注册平台直接 400，不再 500）
+    platform = _validate_platform(platform)
 
     # 查重：同平台下直播间地址/主页地址/平台用户ID任一相同即视为同一主播
     platform_user_id = _extract_platform_user_id(platform, home_url)
     if await _find_duplicate(db, platform, url, home_url, platform_user_id):
         raise HTTPException(status_code=400, detail="该主播已存在（直播间地址或主页地址重复）")
 
+    # P0-11: 作品订阅静默降级的根因修复 —— 未解析到平台用户ID时明确告知用户，
+    # 而不是把 works_enabled 悄悄改成 False 却仍返回"添加成功"。
+    works_degraded = bool(room.works_enabled) and not bool(platform_user_id)
+
     new_room = Room(
         url=url,
         home_url=home_url,
         platform=platform,
-        room_id=PlatformFactory.get_platform_class(platform).extract_room_id(url) if url else None,
+        room_id=_extract_room_id(platform, url) if url else None,
         platform_user_id=platform_user_id or None,
         quality=room.quality,
         enabled=room.enabled,
@@ -199,7 +229,14 @@ async def create_room(room: RoomCreate, background_tasks: BackgroundTasks, db: A
         "url": new_room.url,
         "platform": new_room.platform,
         "platform_user_id": new_room.platform_user_id,
-        "message": "添加成功，正在后台检测..." if url else "添加成功（未配置直播间地址，仅作品订阅）",
+        # 前端据此决定 toast 类型（F-4）：降级时必须明确告知，不能假装成功
+        "works_enabled": bool(new_room.works_enabled),
+        "works_degraded": works_degraded,
+        "message": (
+            "添加成功，但未开启作品订阅：请先填写主播主页地址（或等直播间检测自动识别主播）"
+            if works_degraded else
+            ("添加成功，正在后台检测..." if url else "添加成功（未配置直播间地址，仅作品订阅）")
+        ),
     }
 
 
@@ -268,6 +305,14 @@ async def import_rooms(payload: RoomsImport, db: AsyncSession = Depends(get_db))
             errors.append(f"{url or home_url}: 无法识别平台")
             continue
 
+        # P0-11: 导入数据可能来自外部/旧备份，同样必须白名单校验（否则 500）
+        try:
+            platform = _validate_platform(platform)
+        except HTTPException as he:
+            failed += 1
+            errors.append(f"{url or home_url}: {he.detail}")
+            continue
+
         platform_user_id = _extract_platform_user_id(platform, home_url)
         if await _find_duplicate(db, platform, url, home_url, platform_user_id):
             skipped += 1
@@ -278,7 +323,7 @@ async def import_rooms(payload: RoomsImport, db: AsyncSession = Depends(get_db))
                 url=url,
                 home_url=home_url,
                 platform=platform,
-                room_id=PlatformFactory.get_platform_class(platform).extract_room_id(url) if url else None,
+                room_id=_extract_room_id(platform, url) if url else None,
                 platform_user_id=platform_user_id or None,
                 quality=item.quality or "origin",
                 enabled=bool(item.enabled) if item.enabled is not None else True,
@@ -322,11 +367,27 @@ async def update_room(room_id: int, room: RoomUpdate, background_tasks: Backgrou
         if field in update_data and isinstance(update_data[field], str):
             update_data[field] = update_data[field].strip()
 
+    # P1-32: 平台名必须白名单校验。已复现：PUT /api/rooms/{id} {"platform":"youtube"}
+    # 返回 200 并写库，此后 monitor 每轮只打一行 "不支持的平台" warning，该主播永久无法
+    # 监控且前端无任何报错。这里改为 400。
+    if "platform" in update_data:
+        update_data["platform"] = _validate_platform(update_data["platform"])
+
+    # P1-32: 直播间地址与主页地址至少要保留一个（原实现允许把两者都清空，
+    # 得到一个既不能录制也不能订阅的空壳主播）
+    new_url_val = update_data.get("url", existing.url)
+    new_home_val = update_data.get("home_url", existing.home_url)
+    if not (new_url_val or "").strip() and not (new_home_val or "").strip():
+        raise HTTPException(
+            status_code=400,
+            detail="直播间地址与主页地址不能同时为空（否则该主播既无法录制也无法订阅作品）",
+        )
+
     # 主页地址变化：重新解析平台用户ID；清空主页则同时关闭作品订阅
     if "home_url" in update_data:
         home_url = update_data["home_url"]
         if home_url:
-            puid = _extract_platform_user_id(existing.platform, home_url)
+            puid = _extract_platform_user_id(update_data.get("platform") or existing.platform, home_url)
             if not puid:
                 raise HTTPException(
                     status_code=400,
@@ -345,18 +406,13 @@ async def update_room(room_id: int, room: RoomUpdate, background_tasks: Backgrou
             detected = PlatformFactory.detect_platform(new_url)
             if detected:
                 update_data["platform"] = detected
-        adapter_cls = PlatformFactory.get_platform_class(update_data.get("platform") or existing.platform)
-        if adapter_cls is None:
-            # 退而用通用正则提取
-            import re as _re
-            m = _re.search(r'live\.kuaishou\.com/u/(\w+)|live\.kuaishou\.com/(\w+)|live\.douyin\.com/(\d+)|live\.bilibili\.com/(\d+)', new_url)
-            update_data["room_id"] = (m.group(1) or m.group(2) or m.group(3) or m.group(4) or "") if m else ""
-        else:
-            update_data["room_id"] = adapter_cls.extract_room_id(new_url)
+        target_platform = update_data.get("platform") or existing.platform
+        # P0-11: 平台已白名单校验，这里用统一的 _extract_room_id（内部仍防御 None）
+        update_data["room_id"] = _extract_room_id(target_platform, new_url)
         # 清空已缓存的平台适配器实例，下次检查按新 URL/平台重建
         # P0-2: 使用 PlatformManager.reset 先 close 旧实例再 clear，避免连接泄漏
         try:
-            await monitor._reset_platform_cache()
+            await monitor.reset_platform_cache()
         except Exception:
             pass
 
@@ -399,7 +455,7 @@ async def delete_room(room_id: int, db: AsyncSession = Depends(get_db)):
 
     # 如果正在录制，先停止
     if room.is_recording:
-        await monitor._stop_recording(room)
+        await monitor.stop_recording(room)
 
     # 显式清理从属记录（SQLite 不强制外键，ORM 级联不作用于批量 delete）
     await db.execute(delete(Recording).where(Recording.room_id == room_id))
@@ -445,7 +501,7 @@ async def manual_start_recording(room_id: int, db: AsyncSession = Depends(get_db
         )
 
     # 获取流地址
-    platform = await monitor._get_platform(room.platform)
+    platform = await monitor.get_platform(room.platform)
     if not platform:
         raise HTTPException(status_code=500, detail="平台适配器不可用")
 
@@ -453,7 +509,7 @@ async def manual_start_recording(room_id: int, db: AsyncSession = Depends(get_db
     if not info.stream_url:
         raise HTTPException(status_code=400, detail="无法获取直播流地址")
 
-    await monitor._start_recording(room, info)
+    await monitor.start_recording(room, info)
 
     return {"message": "录制已启动"}
 
@@ -469,7 +525,7 @@ async def manual_stop_recording(room_id: int, db: AsyncSession = Depends(get_db)
     if not room.is_recording:
         raise HTTPException(status_code=400, detail="未在录制中")
 
-    await monitor._stop_recording(room)
+    await monitor.stop_recording(room)
 
     return {"message": "录制已停止"}
 

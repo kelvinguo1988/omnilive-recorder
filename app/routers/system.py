@@ -1,6 +1,7 @@
 """系统状态API"""
 import asyncio
 import json
+import logging
 import psutil
 import platform
 import os
@@ -17,6 +18,8 @@ from app.services.file_manager import file_manager
 from app.services.recorder import recorder
 from app.services.sync_service import sync_service
 from app.config import settings, save_config
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/system", tags=["system"])
 
@@ -132,7 +135,12 @@ async def system_info(db: AsyncSession = Depends(get_db)):
 
 @router.get("/logs")
 async def get_logs(limit: int = 100, level: str = None, db: AsyncSession = Depends(get_db)):
-    """获取系统日志"""
+    """获取系统日志
+
+    P2 修复：limit 钳到 [1, 1000]。SQLite 把 `LIMIT -1` 当无限制，原实现透传
+    query 参数，`?limit=-1` 会返回全表（已实测）。
+    """
+    limit = max(1, min(limit, 1000))
     query = select(SystemLog).order_by(SystemLog.id.desc()).limit(limit)
     if level:
         query = query.where(SystemLog.level == level)
@@ -267,30 +275,62 @@ async def _apply_settings(updates: dict):
             raise HTTPException(status_code=400, detail="daily_merge_max_gb 不能为负")
         updates["daily_merge_max_gb"] = val
 
-    # 应用：更新全局 settings 实例（后续录制/监控自动读取新值）
-    proxy_related_changed = False
-    for key, value in updates.items():
-        old = getattr(settings, key, None)
-        if old != value:
-            setattr(settings, key, value)
-            if key in _PROXY_RELATED:
-                proxy_related_changed = True
-
-    # 输出目录变化：确保目录存在
+    # P0-12: output_dir 空值必须在 apply 之前拦下。
+    # 原实现先 setattr 再 os.makedirs('')，后者抛 FileNotFoundError → 500，
+    # 但内存里的 settings.output_dir 已被改成空串（已复现），
+    # 之后录制/文件管理全部按相对路径工作，直到重启才恢复。
     if "output_dir" in updates:
-        os.makedirs(settings.output_dir, exist_ok=True)
+        out_dir = (updates["output_dir"] or "").strip()
+        if not out_dir:
+            raise HTTPException(status_code=400, detail="输出目录不能为空")
+        updates["output_dir"] = out_dir
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+        except OSError as e:
+            raise HTTPException(status_code=400, detail=f"输出目录不可用: {out_dir} ({e})")
+
+    if "sync_root" in updates:
+        sync_root = (updates["sync_root"] or "").strip()
+        updates["sync_root"] = sync_root
+        # 允许清空（=关闭同步），但非空时必须可创建/可写，避免同步时才发现
+        if sync_root and updates.get("sync_enabled", getattr(settings, "sync_enabled", False)):
+            try:
+                os.makedirs(sync_root, exist_ok=True)
+            except OSError as e:
+                raise HTTPException(status_code=400, detail=f"同步根目录不可用: {sync_root} ({e})")
+
+    # P0-12: 原子化 apply —— 先记下旧值快照，任一步失败全部回滚，
+    # 避免出现"报错但内存配置已改、重启后行为回退"的不一致状态。
+    snapshot = {k: getattr(settings, k) for k in updates}
+    proxy_related_changed = False
+    try:
+        for key, value in updates.items():
+            if getattr(settings, key, None) != value:
+                setattr(settings, key, value)
+                if key in _PROXY_RELATED:
+                    proxy_related_changed = True
+
+        # 输出目录变化：确保目录存在（上面已建，这里兜底）
+        if "output_dir" in updates:
+            os.makedirs(settings.output_dir, exist_ok=True)
+
+        # 持久化到配置文件，重启后依然生效（放线程池，避免同步写盘阻塞事件循环）
+        await asyncio.to_thread(save_config, settings)
+    except Exception as e:
+        # 回滚内存配置，保持"要么全成功、要么全不变"
+        for key, old in snapshot.items():
+            try:
+                setattr(settings, key, old)
+            except Exception:
+                pass
+        logger.error(f"应用设置失败，已回滚内存配置: {e}")
+        raise HTTPException(status_code=500, detail=f"保存配置失败（已回滚）: {e}")
 
     # 代理/cookie 变化：清空已缓存的平台适配器实例，下次检查时按新配置重建
     # P0-2: 使用 _reset_platform_cache 先 close 旧实例再 clear，避免连接泄漏
     if proxy_related_changed:
         from app.services.monitor import monitor
-        await monitor._reset_platform_cache()
-
-    # 持久化到配置文件，重启后依然生效
-    try:
-        save_config(settings)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"保存配置失败: {e}")
+        await monitor.reset_platform_cache()
 
     return {
         "success": True,
