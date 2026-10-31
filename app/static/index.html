@@ -200,6 +200,8 @@
                             <tr><td colspan="7" class="empty-state">加载中...</td></tr>
                         </tbody>
                     </table>
+                    <!-- F-5: 后端默认只返回最近 50 条，满额时在此提示，避免用户以为老记录丢了 -->
+                    <div class="form-hint" id="recordingsHint" style="display:none"></div>
                 </div>
             </div>
         </div>

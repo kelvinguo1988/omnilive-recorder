@@ -1,11 +1,77 @@
 /* Live Recorder - 前端交互逻辑 */
 
+// ---- 统一 API 层 ----
+// F-22: 原来 API.get/post/put/delete 只 then(r=>r.json())，4xx/5xx 也当成功返回，
+// 后端 detail（507 磁盘水位、"未在直播中"、"需先填写主页地址"）全部丢失；
+// 列表接口失败时返回的是错误对象，调用点 .length 变 undefined 又被当成"暂无数据"。
+// 现在所有请求都走 api()：校验 res.ok，失败抛 HttpError{status, detail}。
+
+class HttpError extends Error {
+    constructor(status, detail, url) {
+        super(detail);
+        this.name = 'HttpError';
+        this.status = status;   // HTTP 状态码
+        this.detail = detail;   // 后端 JSON 的 detail 字段（取不到时为状态码兜底文案）
+        this.url = url || '';
+    }
+}
+
+// 从错误响应体里取后端 detail：FastAPI 的 HTTPException 是 {"detail": "..."}，
+// 422 参数校验错误是 {"detail": [{msg, loc}, ...]}
+function _detailOf(data, status) {
+    let detail = data && data.detail;
+    if (Array.isArray(detail)) {
+        detail = detail.map(d => (d && (d.msg || d.message)) || String(d)).join('；');
+    }
+    if (typeof detail === 'object' && detail !== null) detail = JSON.stringify(detail);
+    if (detail) return String(detail);
+    return '请求失败（HTTP ' + status + '）';
+}
+
+async function api(method, url, body) {
+    const opts = { method, headers: { 'Accept': 'application/json' } };
+    if (body !== undefined) {
+        opts.headers['Content-Type'] = 'application/json';
+        opts.body = JSON.stringify(body);
+    }
+    const res = await fetch(url, opts);
+    // 先读文本再解析：204/空体、以及反代返回非 JSON（如 502 HTML）都不会抛 SyntaxError
+    const text = await res.text();
+    let data = null;
+    if (text) {
+        try { data = JSON.parse(text); } catch (e) { data = null; }
+    }
+    if (!res.ok) throw new HttpError(res.status, _detailOf(data, res.status), url);
+    return data;
+}
+
+// 兼容原有调用点（29 处 API.get/post/put/delete 无需改动）
 const API = {
-    get: (url) => fetch(url).then(r => r.json()),
-    post: (url, data) => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }).then(r => r.json()),
-    put: (url, data) => fetch(url, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }).then(r => r.json()),
-    delete: (url) => fetch(url, { method: 'DELETE' }).then(r => r.json()),
+    get: (url) => api('GET', url),
+    post: (url, data) => api('POST', url, data),
+    put: (url, data) => api('PUT', url, data),
+    delete: (url) => api('DELETE', url),
 };
+
+// 统一错误文案：HttpError 直接透出后端 detail，网络错误单独提示
+function errorDetail(e, fallback) {
+    if (e && e.name === 'HttpError' && e.detail) return e.detail;
+    if (e instanceof TypeError) return (fallback || '请求失败') + '（无法连接后端服务）';
+    if (e && e.message) return e.message;
+    return fallback || '操作失败';
+}
+
+// 列表接口约定返回数组；拿到对象/字符串说明后端异常或反代出错，
+// 必须显式失败，不能靠 undefined.length 静默走进"暂无数据"
+function asList(data, what) {
+    if (Array.isArray(data)) return data;
+    throw new Error('接口返回格式异常（' + what + '）');
+}
+
+// 表格加载失败占位行：不假装"暂无数据"
+function tableErrorRow(colspan, message) {
+    return '<tr><td colspan="' + colspan + '" class="empty-state error-state">' + escapeHtml(message) + '</td></tr>';
+}
 
 const PLATFORM_NAMES = { douyin: '抖音', bilibili: 'B站', kuaishou: '快手' };
 const PLATFORM_TAGS = { douyin: 'tag-douyin', bilibili: 'tag-bilibili', kuaishou: 'tag-kuaishou' };
@@ -50,26 +116,50 @@ function escapeHtml(s) {
         .replace(/'/g, '&#39;');
 }
 
+// F-19: 统一的安全日期/大小格式化
+// 之前 formatTime 对非法值输出字面 "Invalid Date"，formatSize(undefined) 输出 "NaN MB"，
+// 而 new Date(坏值).toISOString() 会抛 RangeError 直接中断整块渲染（一个坏时间戳毁掉整页）。
+// safeDate 统一把非法值收敛为 null，由各 format* 输出 "-"。
+function safeDate(value) {
+    if (value === null || value === undefined || value === '') return null;
+    const d = value instanceof Date ? value : new Date(value);
+    return Number.isNaN(d.getTime()) ? null : d;
+}
+
+// 秒级时间戳（后端文件列表的 modified_time 是秒）→ 合法 Date；非法返回 null
+function safeDateFromSeconds(seconds) {
+    const n = Number(seconds);
+    if (!Number.isFinite(n)) return null;
+    return safeDate(n * 1000);
+}
+
 // 格式化时间
 function formatTime(iso) {
-    if (!iso) return '-';
-    const d = new Date(iso);
+    const d = safeDate(iso);
+    if (!d) return '-';
     return d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
 }
 
 function formatDuration(seconds) {
-    if (!seconds || seconds === 0) return '-';
-    const h = Math.floor(seconds / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
-    const s = Math.floor(seconds % 60);
+    // F-19: 非数值（undefined/null/NaN）统一 "-"，避免出现 "NaNs"
+    const total = Number(seconds);
+    if (!Number.isFinite(total) || total <= 0) return '-';
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = Math.floor(total % 60);
     if (h > 0) return `${h}h${m}m`;
     if (m > 0) return `${m}m${s}s`;
     return `${s}s`;
 }
 
+// 大小格式化：非数值（undefined/null/NaN/字符串垃圾）统一 "-"，不再出现 "NaN MB"
 function formatSize(mb) {
-    if (mb >= 1024) return (mb / 1024).toFixed(2) + ' GB';
-    return mb.toFixed(1) + ' MB';
+    // 注意 Number(null) === 0，会误判成"0 MB"；null/undefined/空串都是"大小未知"
+    if (mb === null || mb === undefined || mb === '') return '-';
+    const n = Number(mb);
+    if (!Number.isFinite(n) || n < 0) return '-';
+    if (n >= 1024) return (n / 1024).toFixed(2) + ' GB';
+    return n.toFixed(1) + ' MB';
 }
 
 // 仪表盘
@@ -93,7 +183,7 @@ async function refreshDashboard() {
         document.getElementById('recordingSize').textContent = (disk.recording_size_gb || 0) + ' GB';
 
         // 加载活跃录制
-        const rooms = await API.get('/api/rooms');
+        const rooms = asList(await API.get('/api/rooms'), '主播列表');
         const activeRooms = rooms.filter(r => r.is_recording);
         const container = document.getElementById('activeRecordings');
 
@@ -112,13 +202,15 @@ async function refreshDashboard() {
         }
     } catch (e) {
         console.error('Dashboard error:', e);
+        const container = document.getElementById('activeRecordings');
+        if (container) container.innerHTML = '<div class="empty-state error-state">' + escapeHtml(errorDetail(e, '加载仪表盘失败')) + '</div>';
     }
 }
 
 // 主播管理（统一实体：直播间地址=直播录制，主页地址=作品订阅）
 async function loadRooms() {
     try {
-        const rooms = await API.get('/api/rooms');
+        const rooms = asList(await API.get('/api/rooms'), '主播列表');
         const tbody = document.getElementById('roomsTableBody');
 
         if (rooms.length === 0) {
@@ -180,30 +272,31 @@ async function loadRooms() {
         `).join('');
     } catch (e) {
         console.error('Load rooms error:', e);
-        showToast('加载主播列表失败', 'error');
+        const msg = errorDetail(e, '加载主播列表失败');
+        const tbody = document.getElementById('roomsTableBody');
+        if (tbody) tbody.innerHTML = tableErrorRow(7, msg);
+        showToast(msg, 'error');
     }
 }
 
 async function toggleWorks(id, enabled) {
     try {
         const res = await API.put(`/api/rooms/${id}`, { works_enabled: enabled });
-        if (res.detail) {
-            showToast(res.detail, 'error');
-        } else {
-            showToast(enabled ? '已订阅作品，正在后台回填...' : '已取消作品订阅', enabled ? 'success' : 'info');
-        }
+        showToast(res.message || (enabled ? '已订阅作品，正在后台回填...' : '已取消作品订阅'), enabled ? 'success' : 'info');
         loadRooms();
-    } catch (e) { showToast('操作失败', 'error'); }
+    } catch (e) {
+        showToast(errorDetail(e, '操作失败'), 'error');
+        loadRooms();   // 失败时也要刷新，避免勾选框停留在用户点击后的错误状态
+    }
 }
 
 async function refillWorks(id) {
     if (!confirm('重新全量回填该主播的历史作品？已入库/已下载的不会重复，仅补全之前缺失的（如配置 Cookie 后补全被截断的分页）。')) return;
     try {
         const res = await API.put(`/api/rooms/${id}`, { refill: true });
-        if (res.detail) { showToast(res.detail, 'error'); return; }
-        showToast('已开始重新回填，请稍后刷新作品列表查看进度', 'success');
+        showToast(res.message || '已开始重新回填，请稍后刷新作品列表查看进度', 'success');
         setTimeout(() => loadRooms(), 5000);
-    } catch (e) { showToast('操作失败', 'error'); }
+    } catch (e) { showToast(errorDetail(e, '操作失败'), 'error'); }
 }
 
 async function checkWorksNow(id) {
@@ -211,7 +304,7 @@ async function checkWorksNow(id) {
         await API.post(`/api/works/check/${id}`, {});
         showToast('正在检查新作品...', 'info');
         setTimeout(() => loadRooms(), 5000);
-    } catch (e) { showToast('检查失败', 'error'); }
+    } catch (e) { showToast(errorDetail(e, '检查失败'), 'error'); }
 }
 
 // 添加主播
@@ -264,15 +357,27 @@ async function submitAddRoom() {
             url: url || null, home_url: home_url || null, quality, remark,
             streamer_name: streamer_name || null, works_enabled, enabled: true,
         });
-        if (result.message) {
-            showToast(result.message, 'success');
+        // F-4: 后端 create_room 里 works_enabled = room.works_enabled and bool(platform_user_id)，
+        // 只填直播间地址（未填主页、也解析不出用户ID）时会静默降级为 False，
+        // 但响应文案仍是"添加成功，正在后台检测..."。前端按同样的规则算出实际生效值，
+        // 降级时用 warning 提示，避免用户以为订阅已开启。
+        // 优先用后端回传的 works_enabled（若未来加上该字段），否则用 platform_user_id 复算，
+        // 规则与 rooms.py:182 一致。
+        const worksEnabledActual = typeof result.works_enabled === 'boolean'
+            ? result.works_enabled
+            : (!!works_enabled && !!result.platform_user_id);
+
+        if (works_enabled && !worksEnabledActual) {
+            showToast('主播已添加，但作品订阅未开启：需要先填写主页地址（或等直播间检测识别出主播后再订阅）', 'warning');
             hideAddRoomModal();
             loadRooms();
-        } else if (result.detail) {
-            showToast(result.detail, 'error');
+            return;
         }
+        showToast(result.message || '添加成功', 'success');
+        hideAddRoomModal();
+        loadRooms();
     } catch (e) {
-        showToast('添加失败', 'error');
+        showToast(errorDetail(e, '添加失败'), 'error');
     }
 }
 
@@ -281,7 +386,7 @@ let editingRoom = null;
 
 async function showEditRoomModal(id) {
     try {
-        const rooms = await API.get('/api/rooms');
+        const rooms = asList(await API.get('/api/rooms'), '主播列表');
         const room = rooms.find(r => r.id === id);
         if (!room) { showToast('主播不存在，请刷新列表', 'error'); return; }
 
@@ -295,7 +400,7 @@ async function showEditRoomModal(id) {
         document.getElementById('editRoomModal').style.display = 'flex';
     } catch (e) {
         console.error('Load room for edit error:', e);
-        showToast('加载主播信息失败', 'error');
+        showToast(errorDetail(e, '加载主播信息失败'), 'error');
     }
 }
 
@@ -332,16 +437,18 @@ async function submitEditRoom() {
 
     try {
         const res = await API.put(`/api/rooms/${editingRoom.id}`, payload);
-        if (res.message) {
-            showToast('保存成功', 'success');
-            hideEditRoomModal();
-            loadRooms();
-            if (payload.url || payload.works_enabled) setTimeout(() => loadRooms(), 5000);
-        } else if (res.detail) {
-            showToast(res.detail, 'error');
+        // 同 F-4：清空主页地址时后端会连带把 works_enabled 静默置 False（rooms.py 主页变化分支），
+        // 响应仍只有"更新成功"。这里按同一规则提示，避免用户以为订阅还在。
+        if (payload.home_url === '' && editingRoom.works_enabled) {
+            showToast('已保存，但清空主页地址会同时关闭作品订阅', 'warning');
+        } else {
+            showToast(res.message || '保存成功', 'success');
         }
+        hideEditRoomModal();
+        loadRooms();
+        if (payload.url || payload.works_enabled) setTimeout(() => loadRooms(), 5000);
     } catch (e) {
-        showToast('保存失败', 'error');
+        showToast(errorDetail(e, '保存失败'), 'error');
     }
 }
 
@@ -350,7 +457,7 @@ async function checkRoom(id) {
         await API.post(`/api/rooms/${id}/check`, {});
         showToast('正在检测...', 'info');
         setTimeout(() => loadRooms(), 5000);
-    } catch (e) { showToast('检测失败', 'error'); }
+    } catch (e) { showToast(errorDetail(e, '检测失败'), 'error'); }
 }
 
 async function startRecording(id) {
@@ -359,8 +466,10 @@ async function startRecording(id) {
         showToast('录制已启动', 'success');
         loadRooms();
     } catch (e) {
-        const msg = await e.json?.() || {};
-        showToast(msg.detail || '启动录制失败', 'error');
+        // F-2: 原来这里是 `await e.json?.()`（e 是 TypeError，永远没有 json 方法），
+        // 后端 detail 全丢 —— 包括 507 磁盘水位和"未在直播中"。改为读 HttpError.detail。
+        showToast(errorDetail(e, '启动录制失败'), 'error');
+        loadRooms();
     }
 }
 
@@ -369,7 +478,10 @@ async function stopRecording(id) {
         await API.post(`/api/rooms/${id}/stop-recording`, {});
         showToast('录制已停止', 'success');
         loadRooms();
-    } catch (e) { showToast('停止录制失败', 'error'); }
+    } catch (e) {
+        showToast(errorDetail(e, '停止录制失败'), 'error');
+        loadRooms();
+    }
 }
 
 async function toggleRoom(id, enabled) {
@@ -377,7 +489,7 @@ async function toggleRoom(id, enabled) {
         await API.put(`/api/rooms/${id}`, { enabled });
         showToast(enabled ? '已启用' : '已禁用', 'success');
         loadRooms();
-    } catch (e) { showToast('操作失败', 'error'); }
+    } catch (e) { showToast(errorDetail(e, '操作失败'), 'error'); }
 }
 
 async function deleteRoom(id) {
@@ -386,14 +498,19 @@ async function deleteRoom(id) {
         await API.delete(`/api/rooms/${id}`);
         showToast('删除成功', 'success');
         loadRooms();
-    } catch (e) { showToast('删除失败', 'error'); }
+    } catch (e) { showToast(errorDetail(e, '删除失败'), 'error'); }
 }
 
 // 录制记录
+// F-5: 后端 GET /api/recordings 默认 limit=50（recordings.py:23），前端不传分页参数也没有翻页 UI，
+// 老记录会凭空消失。这里显式带上 limit 并把"仅显示最近 N 条"的提示渲染在表格下方（不改后端）。
+const RECORDINGS_LIMIT = 50;
+
 async function loadRecordings() {
     try {
-        const recordings = await API.get('/api/recordings');
+        const recordings = asList(await API.get(`/api/recordings?limit=${RECORDINGS_LIMIT}`), '录制记录');
         const tbody = document.getElementById('recordingsTableBody');
+        renderRecordingsHint(recordings.length);
 
         if (recordings.length === 0) {
             tbody.innerHTML = '<tr><td colspan="7" class="empty-state">暂无录制记录</td></tr>';
@@ -404,22 +521,41 @@ async function loadRecordings() {
             const statusClass = r.status === 'recording' ? 'status-recording'
                 : r.status === 'completed' ? 'status-completed'
                 : r.status === 'failed' ? 'status-failed' : 'status-offline';
-            const statusText = { recording: '录制中', completed: '已完成', failed: '失败', pending: '等待中' }[r.status] || r.status;
+            const statusText = { recording: '录制中', completed: '已完成', failed: '失败', pending: '等待中' }[r.status] || String(r.status ?? '');
+            // F-19 同类：file_size_mb 先做数值校验，避免 undefined/垃圾值走进 formatSize
+            const sizeMb = Number(r.file_size_mb);
 
             return `
                 <tr>
                     <td><span class="platform-tag ${PLATFORM_TAGS[r.platform] || ''}">${escapeHtml(PLATFORM_NAMES[r.platform] || r.platform)}</span></td>
                     <td>${escapeHtml(r.streamer_name || '-')}</td>
                     <td title="${escapeHtml(r.file_name || '')}">${r.file_name ? escapeHtml(r.file_name.length > 30 ? r.file_name.substring(0, 30) + '...' : r.file_name) : '-'}</td>
-                    <td>${r.file_size_mb > 0 ? formatSize(r.file_size_mb) : '-'}</td>
+                    <td>${Number.isFinite(sizeMb) && sizeMb > 0 ? formatSize(sizeMb) : '-'}</td>
                     <td>${formatDuration(r.duration)}</td>
-                    <td><span class="status-badge ${statusClass}">${statusText}</span></td>
+                    <td><span class="status-badge ${statusClass}">${escapeHtml(statusText)}</span></td>
                     <td>${formatTime(r.started_at)}</td>
                 </tr>
             `;
         }).join('');
     } catch (e) {
         console.error('Load recordings error:', e);
+        const msg = errorDetail(e, '加载录制记录失败');
+        const tbody = document.getElementById('recordingsTableBody');
+        if (tbody) tbody.innerHTML = tableErrorRow(7, msg);
+        renderRecordingsHint(0);
+        showToast(msg, 'error');
+    }
+}
+
+// 录制记录列表下方的"仅显示最近 N 条"提示（满额才提示，避免空列表时误报）
+function renderRecordingsHint(count) {
+    const box = document.getElementById('recordingsHint');
+    if (!box) return;
+    if (count >= RECORDINGS_LIMIT) {
+        box.textContent = `仅显示最近 ${RECORDINGS_LIMIT} 条录制记录（按开始时间倒序），更早的记录仍保存在磁盘与数据库中。`;
+        box.style.display = '';
+    } else {
+        box.style.display = 'none';
     }
 }
 
@@ -438,12 +574,13 @@ function _locLabel(f) {
 
 function _fileRow(f) {
     const loc = _locLabel(f);
+    const name = String(f.name ?? '');
     return `
             <tr>
                 <td class="col-check"><input type="checkbox" class="file-check" data-path="${escapeHtml(f.path)}" onchange="updateMergeBtn()"></td>
-                <td title="${escapeHtml(f.path)}">${loc ? `<span class="file-loc">${escapeHtml(loc)}</span>` : ''}${escapeHtml(f.name.length > 35 ? f.name.substring(0, 35) + '...' : f.name)}</td>
+                <td title="${escapeHtml(f.path)}">${loc ? `<span class="file-loc">${escapeHtml(loc)}</span>` : ''}${escapeHtml(name.length > 35 ? name.substring(0, 35) + '...' : name)}</td>
                 <td>${formatSize(f.size_mb)}</td>
-                <td>${formatTime(new Date(f.modified_time * 1000).toISOString())}</td>
+                <td>${formatTime(safeDateFromSeconds(f.modified_time))}</td>
                 <td>
                     <div class="action-group">
                         ${f.is_video ? `<button class="btn btn-sm btn-secondary" data-act="play" data-path="${escapeHtml(f.path)}">播放</button>` : ''}
@@ -456,7 +593,7 @@ function _fileRow(f) {
 
 function _sectionHtml(category, list) {
     if (!list.length) return '';
-    const totalMb = list.reduce((s, f) => s + f.size_mb, 0);
+    const totalMb = list.reduce((s, f) => s + (Number(f.size_mb) || 0), 0);
     return `
         <section class="archive-col">
             <h4>${ARCHIVE_COLS[category] || '其他'}<small>${list.length} 个 · ${formatSize(totalMb)}</small></h4>
@@ -472,7 +609,7 @@ async function loadFiles() {
     try {
         const platform = document.getElementById('filePlatformFilter')?.value || '';
         const url = '/api/files' + (platform ? `?platform=${encodeURIComponent(platform)}` : '');
-        const files = await API.get(url);
+        const files = asList(await API.get(url), '文件列表');
         const box = document.getElementById('filesGroups');
         const selAll = document.getElementById('selectAll');
         if (selAll) selAll.checked = false;
@@ -494,7 +631,11 @@ async function loadFiles() {
             (g[f.category] || g.other).push(f);
         }
         // 卡片按各主播最后写入时间倒序，最近录制的排在最前
-        const lastOf = g => Math.max(0, ...g.live.concat(g.works, g.other).map(f => f.modified_time));
+        // F-19: 任一文件的 modified_time 非法会让 Math.max 得到 NaN（排序失效），先收敛为 0
+        const lastOf = g => Math.max(0, ...g.live.concat(g.works, g.other).map(f => {
+            const n = Number(f.modified_time);
+            return Number.isFinite(n) ? n : 0;
+        }));
         const list = [...groups.values()].sort((a, b) => lastOf(b) - lastOf(a));
 
         box.innerHTML = list.map((g, idx) => {
@@ -512,8 +653,8 @@ async function loadFiles() {
                 </button>
                 ${g.platform ? `<span class="platform-tag ${platKey ? PLATFORM_TAGS[platKey] : ''}">${escapeHtml(g.platform)}</span>` : ''}
                 <span class="streamer-meta">
-                    直播间 ${g.live.length} · 作品 ${g.works.length} · ${formatSize(all.reduce((s, f) => s + f.size_mb, 0))}
-                    · 更新于 ${formatTime(new Date(lastOf(g) * 1000).toISOString())}
+                    直播间 ${g.live.length} · 作品 ${g.works.length} · ${formatSize(all.reduce((s, f) => s + (Number(f.size_mb) || 0), 0))}
+                    · 更新于 ${formatTime(safeDateFromSeconds(lastOf(g)))}
                 </span>
             </div>
             <div class="streamer-body" id="sbody-${idx}" data-key="${escapeHtml(g.name)}" style="${open ? '' : 'display:none'}">
@@ -527,6 +668,13 @@ async function loadFiles() {
         updateMergeBtn();
     } catch (e) {
         console.error('Load files error:', e);
+        const msg = errorDetail(e, '加载文件列表失败');
+        const box = document.getElementById('filesGroups');
+        if (box) box.innerHTML = '<div class="card"><div class="empty-state error-state">' + escapeHtml(msg) + '</div></div>';
+        const selAll = document.getElementById('selectAll');
+        if (selAll) selAll.checked = false;
+        updateMergeBtn();
+        showToast(msg, 'error');
     }
 }
 
@@ -578,7 +726,7 @@ async function deleteFile(path) {
         await API.delete('/api/files/' + path.split('/').map(encodeURIComponent).join('/'));
         showToast('删除成功', 'success');
         loadFiles();
-    } catch (e) { showToast('删除失败', 'error'); }
+    } catch (e) { showToast(errorDetail(e, '删除失败'), 'error'); }
 }
 
 // 合并选中文件
@@ -617,19 +765,29 @@ async function deleteSelected() {
 
     const file_paths = checked.map(c => c.dataset.path);
     const btn = document.getElementById('delBtn');
+    // F-10: 按钮文案保存原值（含 <span id="delCount"> 结构），成功分支也必须恢复，
+    // 否则按钮会长期显示"删除中..."直到刷新，用户会重复点击。
+    const prevHtml = btn ? btn.innerHTML : '';
     if (btn) { btn.disabled = true; btn.textContent = '删除中...'; }
 
     try {
         const res = await API.post('/api/files/batch-delete', { file_paths });
         if (res.failed_count > 0) {
-            showToast(`已删除 ${res.deleted_count} 个，失败 ${res.failed_count} 个`, 'error');
+            const failedDetail = (res.failed || [])
+                .slice(0, 3)
+                .map(x => `${x.path}: ${x.error}`)
+                .join('；');
+            showToast(`已删除 ${res.deleted_count} 个，失败 ${res.failed_count} 个` + (failedDetail ? `（${failedDetail}）` : ''), 'error');
         } else {
             showToast(`已批量删除 ${res.deleted_count} 个文件`, 'success');
         }
-        loadFiles();
+        await loadFiles();
     } catch (e) {
-        showToast('批量删除失败', 'error');
-        if (btn) btn.disabled = false;
+        showToast(errorDetail(e, '批量删除失败'), 'error');
+    } finally {
+        // F-10: 无论成功/失败都恢复按钮文案（按钮在页头工具栏，loadFiles 不会重建它）
+        if (btn) btn.innerHTML = prevHtml;
+        updateMergeBtn();
     }
 }
 
@@ -652,14 +810,15 @@ async function mergeSelected() {
     try {
         const res = await API.post('/api/files/merge', { file_paths, output_format });
         if (res.success) {
-            showToast(`合并成功：${res.output_name}（${res.file_size_mb} MB，${res.input_count} 个文件）`, 'success');
+            showToast(`合并成功：${res.output_name}（${formatSize(res.file_size_mb)}，${res.input_count} 个文件）`, 'success');
             loadFiles();
             return;
         }
         showToast(res.detail || res.error || '合并失败', 'error');
     } catch (e) {
-        const msg = await e.json?.() || {};
-        showToast(msg.detail || '合并失败', 'error');
+        // F-2: 同 startRecording —— 原来的 `await e.json?.()` 是死代码，
+        // 后端 400 的 detail（"请至少选择 2 个文件" / 合并错误原因）全丢
+        showToast(errorDetail(e, '合并失败'), 'error');
     } finally {
         btn.disabled = false;
         btn.innerHTML = prevHtml;
@@ -673,7 +832,7 @@ async function loadWorksPage() {
     try {
         const filter = document.getElementById('worksCreatorFilter');
         if (filter && filter.options.length <= 1) {
-            const rooms = await API.get('/api/rooms');
+            const rooms = asList(await API.get('/api/rooms'), '主播列表');
             filter.innerHTML = '<option value="">全部主播</option>' + rooms
                 .filter(r => r.works_enabled)
                 .map(r => `<option value="${r.id}">${escapeHtml(r.streamer_name || r.platform_user_id || r.id)}</option>`)
@@ -690,7 +849,7 @@ async function loadWorksTable() {
         let url = '/api/works?limit=200';
         if (roomId) url += `&room_id=${roomId}`;
         if (status) url += `&status=${status}`;
-        const works = await API.get(url);
+        const works = asList(await API.get(url), '作品列表');
         const tbody = document.getElementById('worksTableBody');
 
         if (works.length === 0) {
@@ -707,15 +866,16 @@ async function loadWorksTable() {
         tbody.innerHTML = works.map(w => {
             const [cls, text] = STATUS[w.status] || ['status-offline', w.status];
             const canPlay = w.status === 'completed' && w.work_type === 'video' && w.file_path;
+            const title = String(w.title ?? '');
             return `
                 <tr>
                     <td><span class="platform-tag">${escapeHtml(w.platform_name)}</span></td>
                     <td>${escapeHtml(w.nickname || '-')}</td>
-                    <td title="${escapeHtml(w.title || '')}">${w.title ? escapeHtml(w.title.length > 30 ? w.title.substring(0, 30) + '...' : w.title) : '-'}</td>
+                    <td title="${escapeHtml(title)}">${title ? escapeHtml(title.length > 30 ? title.substring(0, 30) + '...' : title) : '-'}</td>
                     <td>${w.work_type === 'images' ? '图集' : '视频'}</td>
                     <td>${formatTime(w.publish_time)}</td>
                     <td>${w.file_size_mb > 0 ? formatSize(w.file_size_mb) : '-'}</td>
-                    <td title="${escapeHtml(w.error_message || '')}"><span class="status-badge ${cls}">${text}</span></td>
+                    <td title="${escapeHtml(w.error_message || '')}"><span class="status-badge ${cls}">${escapeHtml(text)}</span></td>
                     <td>
                         <div class="action-group">
                             ${canPlay ? `<button class="btn btn-sm btn-secondary" data-act="play-work" data-path="${escapeHtml(w.file_path)}">播放</button>` : ''}
@@ -729,6 +889,10 @@ async function loadWorksTable() {
         }).join('');
     } catch (e) {
         console.error('Load works error:', e);
+        const msg = errorDetail(e, '加载作品列表失败');
+        const tbody = document.getElementById('worksTableBody');
+        if (tbody) tbody.innerHTML = tableErrorRow(8, msg);
+        showToast(msg, 'error');
     }
 }
 
@@ -737,7 +901,7 @@ async function retryWork(id) {
         const res = await API.post(`/api/works/${id}/retry`, {});
         showToast(res.message || '已加入下载队列', 'success');
         setTimeout(() => { loadRooms(); loadWorksTable(); }, 3000);
-    } catch (e) { showToast('操作失败', 'error'); }
+    } catch (e) { showToast(errorDetail(e, '操作失败'), 'error'); }
 }
 
 async function deleteWork(id) {
@@ -747,7 +911,7 @@ async function deleteWork(id) {
         showToast('删除成功', 'success');
         loadRooms();
         loadWorksTable();
-    } catch (e) { showToast('删除失败', 'error'); }
+    } catch (e) { showToast(errorDetail(e, '删除失败'), 'error'); }
 }
 
 // 系统设置
@@ -794,30 +958,49 @@ async function loadSettings() {
         setField('set_sync_root', s.sync_root);
         setField('set_sync_interval', s.sync_interval);
 
-        const platforms = await API.get('/api/system/platforms');
+        const platforms = asList(await API.get('/api/system/platforms'), '平台列表');
         document.getElementById('cfgPlatforms').innerHTML = platforms.map(p =>
-            `<span class="platform-tag" style="background:${p.color}22;color:${p.color}">${p.name}</span>`
+            // 顺带修未转义插值：数据源是后端硬编码的平台表，当前不可利用，但颜色/名称
+            // 一旦改为可配置即成为注入点。color 只允许 #RRGGBB 才拼进 style。
+            `<span class="platform-tag" style="background:${_safeColor(p.color)}22;color:${_safeColor(p.color)}">${escapeHtml(p.name)}</span>`
         ).join(' ');
 
         updateFilenamePreview();
 
         // 加载日志
-        const logs = await API.get('/api/system/logs?limit=50');
+        const logs = asList(await API.get('/api/system/logs?limit=50'), '系统日志');
         const container = document.getElementById('logContainer');
         if (logs.length === 0) {
             container.innerHTML = '<div class="empty-state">暂无日志</div>';
         } else {
-            container.innerHTML = logs.map(l => `
+            // level 用于 class 名（只允许字母），message 已经 escapeHtml；
+            // 原实现 l.level 直接拼进 class 与文本，属未转义插值
+            container.innerHTML = logs.map(l => {
+                const level = _safeLevel(l.level);
+                return `
                 <div class="log-entry">
                     <span class="log-time">${formatTime(l.created_at)}</span>
-                    <span class="log-level ${l.level}">${l.level.toUpperCase()}</span>
+                    <span class="log-level ${level}">${escapeHtml(level.toUpperCase())}</span>
                     <span class="log-msg">${escapeHtml(l.message)}</span>
                 </div>
-            `).join('');
+            `;
+            }).join('');
         }
     } catch (e) {
         console.error('Load settings error:', e);
+        showToast(errorDetail(e, '加载设置失败'), 'error');
     }
+}
+
+// 颜色白名单：只接受 #RGB / #RRGGBB，其余回退中性灰（防止 style 属性注入）
+function _safeColor(c) {
+    return /^#[0-9a-fA-F]{3,8}$/.test(String(c || '')) ? c : '#888';
+}
+
+// 日志级别白名单：拼进 class 名的值必须是已知级别，否则回退 info
+function _safeLevel(level) {
+    const lv = String(level || '').toLowerCase();
+    return ['debug', 'info', 'warning', 'error', 'critical'].includes(lv) ? lv : 'info';
 }
 
 // 表单辅助：根据 id 设置值/勾选状态
@@ -839,6 +1022,17 @@ function getCheck(id) {
 }
 
 // 保存设置
+// F-3: daily_merge_max_gb / works_backfill_limit 的 0 有语义（0=关闭当日合并 / 0=回填不限制）。
+// 原实现 parseFloat(...) || 0 把"清空输入框"也变成 0 提交 —— 等于静默关掉当日合并、
+// 把回填改成全量。改为：只有输入框非空（用户显式输入了数字）才提交，留空一律不提交。
+// 返回 undefined 表示"未填写/非法"，由调用方从 payload 中剔除。
+function numberField(id) {
+    const raw = getField(id).trim();
+    if (raw === '') return undefined;              // 留空 = 不提交（保持后端现值）
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : undefined;     // 非法输入同样不提交，避免提交 NaN
+}
+
 async function saveSettings(e) {
     const payload = {
         record_format: getField('set_record_format'),
@@ -846,19 +1040,24 @@ async function saveSettings(e) {
         monitor_interval: parseInt(getField('set_monitor_interval'), 10) || 0,
         check_timeout: parseInt(getField('set_check_timeout'), 10) || 0,
         max_disk_usage: parseInt(getField('set_max_disk_usage'), 10) || 0,
-        daily_merge_max_gb: parseFloat(getField('set_daily_merge_max_gb')) || 0,
         output_dir: getField('set_output_dir'),
         filename_template: getField('set_filename_template'),
         enable_notification: getCheck('set_enable_notification'),
         enable_proxy: getCheck('set_enable_proxy'),
-        works_backfill_limit: parseInt(getField('set_works_backfill_limit'), 10) || 0,
         works_auto_download: getCheck('set_works_auto_download'),
         sync_enabled: getCheck('set_sync_enabled'),
         sync_root: getField('set_sync_root').trim(),
         sync_interval: parseInt(getField('set_sync_interval'), 10) || 0,
     };
+
+    // 0 有语义的两个字段：留空不提交，显式输入 0 才提交 0
+    const dailyMerge = numberField('set_daily_merge_max_gb');
+    if (dailyMerge !== undefined) payload.daily_merge_max_gb = dailyMerge;
+    const backfillLimit = numberField('set_works_backfill_limit');
+    if (backfillLimit !== undefined) payload.works_backfill_limit = Math.trunc(backfillLimit);
+
     // 正整数字段留空/为 0 时不提交（后端仅更新传入项），避免保存 Cookie 等其它
-    // 设置时被无关字段的"必须为正数"校验误拦；0 有语义的字段（回填上限/合并上限）始终提交
+    // 设置时被无关字段的"必须为正数"校验误拦
     for (const k of ["segment_time", "monitor_interval", "check_timeout",
                      "max_disk_usage", "works_check_count", "sync_interval"]) {
         if (!(payload[k] > 0)) delete payload[k];
@@ -879,15 +1078,16 @@ async function saveSettings(e) {
 
     try {
         const res = await API.put('/api/system/settings', payload);
-        if (res.success) {
+        // F-22 之后失败会抛 HttpError，这里 success 分支基本必达；
+        // 保留 res.success 判断以防后端返回非 success 的 200
+        if (res && res.success === false) {
+            showToast('保存失败: ' + (res.detail || res.message || '未知错误'), 'error');
+        } else {
             showToast('设置已保存并生效', 'success');
             await loadSettings();
-        } else {
-            showToast('保存失败: ' + (res.detail || '未知错误'), 'error');
         }
     } catch (e) {
-        const msg = (e && e.detail) || (e && e.message) || e;
-        showToast('保存失败: ' + msg, 'error');
+        showToast('保存失败: ' + errorDetail(e, '未知错误'), 'error');
     } finally {
         if (btn) { btn.disabled = false; btn.textContent = oldLabel; }
     }
@@ -900,10 +1100,10 @@ async function syncNow() {
     if (btn) { btn.disabled = true; btn.textContent = '同步中...'; }
     try {
         const res = await API.post('/api/system/sync/run', {});
-        if (res.detail) showToast(res.detail, 'error');
-        else showToast(res.message || '同步完成', 'success');
+        showToast(res.message || '同步完成', 'success');
     } catch (e) {
-        showToast('同步失败（网络错误）', 'error');
+        // 后端错误（未配置同步根目录 / 同步失败）现在是 HttpError.detail，不再走网络错误文案
+        showToast(errorDetail(e, '同步失败'), 'error');
     } finally {
         if (btn) { btn.disabled = false; btn.textContent = old; }
     }
@@ -950,10 +1150,17 @@ function dateStr() {
     return d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0');
 }
 
+// F-22: 导出接口返回的是文件文本（非 JSON），不能走 api()；但它同样必须校验 res.ok，
+// 并且抛同一种 HttpError，这样 catch 分支的 errorDetail 能统一透出后端 detail。
 async function fetchText(url) {
-    const r = await fetch(url);
-    if (!r.ok) throw new Error('请求失败: ' + r.status);
-    return r.text();
+    const r = await fetch(url, { headers: { 'Accept': 'application/json, text/plain' } });
+    const text = await r.text();
+    if (!r.ok) {
+        let data = null;
+        try { data = JSON.parse(text); } catch (e) { data = null; }
+        throw new HttpError(r.status, _detailOf(data, r.status), url);
+    }
+    return text;
 }
 
 function downloadText(content, filename, mime = 'application/json') {
@@ -976,7 +1183,7 @@ async function exportRooms() {
         showToast('房间已导出', 'success');
     } catch (e) {
         console.error('Export rooms error:', e);
-        showToast('导出失败', 'error');
+        showToast(errorDetail(e, '导出失败'), 'error');
     }
 }
 
@@ -998,7 +1205,11 @@ async function importRoomsFromFile(input) {
         loadRooms();
     } catch (e) {
         console.error('Import rooms error:', e);
-        showToast('导入失败：文件格式错误', 'error');
+        // HttpError 说明文件本身合法、后端拒绝了内容（detail 有具体原因）；
+        // 其余（JSON.parse 失败 / TypeError）才是格式问题
+        showToast(e && e.name === 'HttpError'
+            ? errorDetail(e, '导入失败')
+            : '导入失败：文件格式错误', 'error');
     } finally {
         input.value = '';
     }
@@ -1012,7 +1223,7 @@ async function exportSettings() {
         showToast('设置已导出', 'success');
     } catch (e) {
         console.error('Export settings error:', e);
-        showToast('导出失败', 'error');
+        showToast(errorDetail(e, '导出失败'), 'error');
     }
 }
 
@@ -1025,15 +1236,13 @@ async function importSettingsFromFile(input) {
         const data = JSON.parse(text);
         const payload = data.settings ? data.settings : data;
         const res = await API.post('/api/system/settings/import', payload);
-        if (res.success) {
-            showToast('设置已导入并生效', 'success');
-            await loadSettings();
-        } else {
-            showToast('导入失败: ' + (res.detail || '未知错误'), 'error');
-        }
+        showToast(res.message || '设置已导入并生效', 'success');
+        await loadSettings();
     } catch (e) {
         console.error('Import settings error:', e);
-        showToast('导入失败：文件格式错误', 'error');
+        showToast(e && e.name === 'HttpError'
+            ? errorDetail(e, '导入失败')
+            : '导入失败：文件格式错误', 'error');
     } finally {
         input.value = '';
     }

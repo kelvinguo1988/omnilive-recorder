@@ -161,6 +161,8 @@ body {
 .data-table tr:last-child td { border-bottom: none; }
 
 .empty-state { text-align: center; color: var(--text-tertiary); padding: 32px; }
+/* F-1: 加载失败的占位与"暂无数据"区分开，避免用户误以为数据丢了 */
+.empty-state.error-state { color: var(--danger); }
 
 /* 平台标签 */
 .platform-tag {
@@ -330,6 +332,8 @@ body {
 .toast.success { background: var(--success); }
 .toast.error { background: var(--danger); }
 .toast.info { background: var(--info); }
+/* F-4: 降级提示（如"作品订阅未生效"）需要区别于成功/失败的中性警示色 */
+.toast.warning { background: var(--warning); color: #1a1a1d; }
 
 @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
 
