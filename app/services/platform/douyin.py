@@ -1,16 +1,48 @@
 """抖音直播适配器"""
 import re
-import hashlib
-import time
 import logging
 from typing import Optional
 from app.services.platform.base import (
     BasePlatform, RoomInfo, PlatformFactory, UserInfo, WorkInfo,
     WORKS_UA, WORKS_UA_CHROME_VER,
 )
-from app.services.platform.vendor.abogus import ABogus
+from app.services.platform.vendor.abogus import ABogus, BrowserFingerprintGenerator
 
 logger = logging.getLogger(__name__)
+
+# a_bogus 签名器缓存（按 UA 键控，进程级复用）。
+# P1-1: ABogus 构造时会随机生成浏览器指纹（屏宽/高/outer 尺寸），
+# 若每次签名都新建实例，同一会话内指纹会逐请求漂移——真实浏览器不会这样，
+# 这是抖音 -352/空列表的最常见诱因。指纹只生成一次，之后所有请求复用同一实例。
+# 键控 UA 是必须的：a_bogus 会把 UA 加密进签名，请求头 UA 与签名 UA 必须完全一致。
+#
+# 指纹的浏览器类型也必须与 UA 一致：原实现固定用 generate_fingerprint("Edge")，
+# 而项目里请求头 UA 声称的是 Chrome（WORKS_UA，Chrome/131）——
+# 「Chrome UA + Edge 指纹」是典型的自相矛盾特征，同样会被风控识别。
+_abogus_signers: dict = {}
+
+
+def _ua_browser_type(user_agent: str) -> str:
+    """从 UA 推断浏览器类型，供生成与之匹配的设备指纹"""
+    ua = user_agent or ""
+    if "Edg/" in ua:
+        return "Edge"
+    if "Firefox/" in ua:
+        return "Firefox"
+    if "Safari/" in ua and "Chrome/" not in ua:
+        return "Safari"
+    return "Chrome"
+
+
+def _get_abogus_signer(user_agent: str) -> ABogus:
+    """取（并按 UA 缓存）签名器实例。构造只发生一次，指纹不再逐请求漂移。"""
+    signer = _abogus_signers.get(user_agent)
+    if signer is None:
+        browser_type = _ua_browser_type(user_agent)
+        fp = BrowserFingerprintGenerator.generate_fingerprint(browser_type)
+        signer = ABogus(fp=fp, user_agent=user_agent)
+        _abogus_signers[user_agent] = signer
+    return signer
 
 
 @PlatformFactory.register
@@ -44,6 +76,8 @@ class DouyinPlatform(BasePlatform):
 
         if not room_id:
             logger.error(f"无法从URL提取抖音房间ID: {url}")
+            # 解析不出房间号 = 本次没有可信的直播状态，标记探测失败（P0-8）
+            info.probe_ok = False
             return info
 
         info.room_id = room_id
@@ -70,6 +104,8 @@ class DouyinPlatform(BasePlatform):
 
         except Exception as e:
             logger.error(f"获取抖音房间信息失败 {url}: {e}")
+            # 异常即探测失败：此时 is_live 仍是默认 False，不能当作"已下播"（P0-8）
+            info.probe_ok = False
 
         return info
 
@@ -81,7 +117,6 @@ class DouyinPlatform(BasePlatform):
         """
         try:
             ttwid = await self._get_ttwid()
-            ms_token = await self._get_ms_token()
 
             api_url = "https://live.douyin.com/webcast/room/web/enter/"
             params = {
@@ -111,39 +146,67 @@ class DouyinPlatform(BasePlatform):
                 headers["Cookie"] = self.cookie
             if ttwid:
                 headers["Cookie"] = headers.get("Cookie", "") + f"; ttwid={ttwid}"
-            if ms_token:
-                params["msToken"] = ms_token
-                headers["X-Bogus"] = self._get_x_bogus(params)
+            # P0-9: 不再伪造 msToken / X-Bogus。
+            # 原实现用 `md5(query)+timestamp` 拼 base64 造一个假 X-Bogus，且只要生成了
+            # msToken 就必然把它塞进请求头。抖音服务端对**非法** X-Bogus 的处置比不传更严
+            # （直接 status_code != 0 / 空 data），等于主动把自己判成机器人。
+            # 游客态取直播间信息本就不需要这两个参数；需要签名的作品接口走 _sign_params
+            # 里的真实 a_bogus（见 P1-1 的进程级签名器）。
 
             response = await self.client.get(api_url, headers=headers, params=params)
             data = response.json()
 
-            if data.get("status_code") == 0:
-                room_data = data.get("data", {}).get("data", [{}])[0]
-                if room_data:
-                    if info is not None:
-                        # 标题：游客态接口也返回，直接回填
-                        if not info.title and room_data.get("title"):
-                            info.title = room_data.get("title")
-                        # 主播名：仅登录态(带 Cookie)接口才返回 owner，游客态 owner 为空
-                        owner = room_data.get("owner") or {}
-                        if isinstance(owner, dict):
-                            nick = owner.get("nickname", "")
-                            if nick and not info.streamer_name:
-                                info.streamer_name = nick
-                            # 主播 sec_uid：直播间↔主页互通的关键（作品订阅依赖）
-                            if owner.get("sec_uid"):
-                                info.owner_user_id = owner["sec_uid"]
-                        # 以接口返回的直播状态为准（2=直播中）
-                        status = room_data.get("status")
-                        if status is not None:
-                            info.is_live = status == 2
+            # P0-8: 接口非 0 状态码（风控/参数失效）拿不到可信的直播状态，
+            # 标记探测失败，调用方（monitor）据此跳过本轮状态迁移，
+            # 不把一次风控/抖动当成"下播"而切断正在进行的录制。
+            if data.get("status_code") != 0:
+                logger.warning(
+                    f"抖音 enter 接口异常: status_code={data.get('status_code')} "
+                    f"{(data.get('status_msg') or '')[:120]}"
+                )
+                if info is not None:
+                    info.probe_ok = False
+                return ""
 
-                    stream_url_data = room_data.get("stream_url", {})
-                    return self._extract_flv_stream(stream_url_data) or self._extract_hls_stream(stream_url_data)
+            room_data = data.get("data", {}).get("data", [{}])[0]
+            if not room_data:
+                # 返回了空 data（风控常见表现）：同样视为探测失败
+                if info is not None:
+                    info.probe_ok = False
+                return ""
+
+            if info is not None:
+                # 标题：游客态接口也返回，直接回填
+                if not info.title and room_data.get("title"):
+                    info.title = room_data.get("title")
+                # 主播名：仅登录态(带 Cookie)接口才返回 owner，游客态 owner 为空
+                owner = room_data.get("owner") or {}
+                if isinstance(owner, dict):
+                    nick = owner.get("nickname", "")
+                    if nick and not info.streamer_name:
+                        info.streamer_name = nick
+                    # 主播 sec_uid：直播间↔主页互通的关键（作品订阅依赖）
+                    if owner.get("sec_uid"):
+                        info.owner_user_id = owner["sec_uid"]
+                # 以接口返回的直播状态为准（2=直播中）
+                status = room_data.get("status")
+                if status is not None:
+                    info.is_live = status == 2
+
+            stream_url_data = room_data.get("stream_url", {})
+            stream_url = self._extract_flv_stream(stream_url_data) or self._extract_hls_stream(stream_url_data)
+            if info is not None and not stream_url:
+                # 既没有 status 字段又没有流地址：这条响应不构成可信的"未开播"证据，
+                # 只有明确 status!=2 时才算确认下播（P0-8）
+                if room_data.get("status") is None:
+                    info.probe_ok = False
+            return stream_url
 
         except Exception as e:
             logger.error(f"API获取抖音流地址失败: {e}")
+            # 异常（超时/连接重置/JSON 解析失败）= 探测失败（P0-8）
+            if info is not None:
+                info.probe_ok = False
 
         return ""
 
@@ -173,33 +236,6 @@ class DouyinPlatform(BasePlatform):
         except Exception:
             pass
         return ""
-
-    async def _get_ms_token(self) -> str:
-        """生成msToken"""
-        import random
-        import string
-        chars = string.ascii_letters + string.digits + "=_"
-        return "".join(random.choice(chars) for _ in range(107))
-
-    def _get_x_bogus(self, params: dict) -> str:
-        """生成X-Bogus签名 (简化版)"""
-        import base64
-        import struct
-
-        query = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
-        timestamp = int(time.time())
-
-        data = query.encode("utf-8")
-        hash_val = hashlib.md5(data).hexdigest()
-
-        bogus_base = f"{hash_val}{timestamp}"
-        bogus_bytes = bogus_base.encode("utf-8")[:16]
-
-        try:
-            result = base64.b64encode(bogus_bytes).decode("utf-8")
-            return result[:28]
-        except Exception:
-            return "DFSzswVOsQX78StNBWeM"
 
     def _extract_flv_stream(self, stream_url_data: dict) -> str:
         """提取FLV直播流地址"""
@@ -275,10 +311,15 @@ class DouyinPlatform(BasePlatform):
         }
 
     def _sign_params(self, params: dict) -> str:
-        """对查询串做 a_bogus 签名，返回已附加 a_bogus 的完整参数串"""
+        """对查询串做 a_bogus 签名，返回已附加 a_bogus 的完整参数串
+
+        P1-1: 复用进程级签名器（见模块顶部 _get_abogus_signer），指纹只在首次构造时
+        生成一次。原实现每次调用都 ABogus(user_agent=WORKS_UA) 新建实例，
+        构造函数里的 random.randint 让屏宽/高/outer 尺寸逐请求漂移，
+        同一会话的指纹前后不一致 —— 这是抖音 -352/空列表的高发诱因。
+        """
         qs = "&".join(f"{k}={v}" for k, v in params.items())
-        ab = ABogus(user_agent=WORKS_UA)
-        return ab.generate_abogus(qs)[0]
+        return _get_abogus_signer(WORKS_UA).generate_abogus(qs)[0]
 
     async def get_user_info(self, user_id: str) -> UserInfo:
         info = UserInfo(user_id=user_id)

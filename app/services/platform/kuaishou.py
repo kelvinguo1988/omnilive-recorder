@@ -189,6 +189,8 @@ class KuaishouPlatform(BasePlatform):
 
         except Exception as e:
             logger.error(f"获取快手房间信息失败 {url}: {e}")
+            # 探测失败（网络/风控/解析异常）：is_live 无意义，标记不可信（P0-8）
+            info.probe_ok = False
 
         return info
 

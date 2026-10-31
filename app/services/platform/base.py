@@ -3,7 +3,6 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional
 import httpx
-import re
 import logging
 
 logger = logging.getLogger(__name__)
@@ -32,6 +31,10 @@ class RoomInfo:
     # 主播平台用户ID(sec_uid/mid/principal)：直播间↔主页互通的关键，
     # 检测直播间时回填，之后无需主页地址即可订阅作品
     owner_user_id: str = ""
+    # 探测是否可信：False=本次探测失败（网络/风控/解析异常/接口返回空数据），
+    # 此时 is_live 的值没有意义，调用方不得据此判断"下播"并结束场次，
+    # 否则一次网络抖动就会被当成下播，把同一直播切成多段（P0-8）。
+    probe_ok: bool = True
 
 
 @dataclass

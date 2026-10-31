@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urlparse
 
-from sqlalchemy import select, update
+from sqlalchemy import select, update, or_
 
 from app.database import async_session
 from app.models import Room, Work
@@ -42,6 +42,35 @@ DOWNLOAD_HEADERS = {
     "kuaishou": {"User-Agent": WORKS_UA, "Referer": "https://www.kuaishou.com/"},
 }
 
+# P1-5: 各平台 CDN 的显式域名白名单（按 host 后缀匹配，见 _headers_for）。
+# 快手作品 CDN 实际域名是 *.yximgs.com / *.kwaicdn.com，原"platform in host"猜法
+# 全部落空 → 无 Referer → 403。
+DOWNLOAD_HOSTS = {
+    "douyin": ("douyin.com", "douyinpic.com", "douyinvod.com", "bytecdn.cn",
+               "bytedance.com", "zjcdn.com", "ixigua.com", "pstatp.com",
+               "snssdk.com", "amemv.com"),
+    "bilibili": ("bilibili.com", "hdslb.com", "bilivideo.com", "acgvideo.com",
+                 "biliapi.net", "akamaized.net"),
+    "kuaishou": ("kuaishou.com", "yximgs.com", "kwimgs.com", "kwaicdn.com",
+                 "kwai.com", "gifshow.com", "kuaishouzt.com", "chenzhongtech.com",
+                 "kscdn.com", "kspkg.com"),
+}
+
+def _redact_url(url: str, keep: int = 40) -> str:
+    """去掉 URL 的 query（通常含签名 token）与超长部分，仅用于日志/错误信息。
+
+    P1-9: CDN 直链带 txTime/txSecret/a_bogus 等时效凭据，不能进 error_message
+    再被 API 回显给前端。这里只保留 scheme+host+path 前缀。
+    """
+    try:
+        p = urlparse(url)
+        host = p.netloc or ""
+        path = (p.path or "")[:keep]
+        return f"{host}{path}" + ("…" if len(p.path or "") > keep else "")
+    except Exception:
+        return (url or "")[:keep]
+
+
 # 平台间请求随机间隔（秒）：作品列表拉取后
 CHECK_JITTER = (2.0, 6.0)
 # 同平台相邻下载的最小间隔（秒）
@@ -57,10 +86,23 @@ class WorksMonitor:
         # 每平台下载并发=1，避免同一平台并发请求触发风控
         self._download_sems: dict = {p: asyncio.Semaphore(1) for p in PLATFORM_CN}
         self._last_download_ts: dict = {}
-        # 重入保护：API 触发的立即检查与循环检查不并发执行
-        self._check_lock = asyncio.Lock()
+        # P0-10: 重入保护必须是 **per-room**，不能是全局单锁。
+        # 原实现用一把全局 _check_lock 包住整个 _check_room_works_inner，
+        # 而其中 _backfill() 的整条翻页链（每页 asyncio.sleep(2~5)、最多 500 页、
+        # works_backfill_limit 默认 0=不限量）都在锁内 —— 于是一个历史作品多的主播
+        # 回填期间，其余所有主播的增量检查、以及 POST /api/works/check/{id}
+        # 触发的立即检查全部排队数十分钟到数小时，用户点"立即检查"看起来无响应。
+        self._check_locks: dict[int, asyncio.Lock] = {}
         # 磁盘水位告警节流
         self._last_disk_warn: float = 0.0
+
+    def _check_lock_for(self, room_id: int) -> asyncio.Lock:
+        """取该主播的检查锁（惰性创建），只串行化同一主播的并发检查"""
+        lock = self._check_locks.get(room_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._check_locks[room_id] = lock
+        return lock
 
     # ---------- 生命周期 ----------
 
@@ -284,7 +326,8 @@ class WorksMonitor:
         """检查单个主播的作品：未回填则全量回填，否则增量拉最新一页"""
         if not room.platform_user_id:
             return
-        async with self._check_lock:
+        # P0-10: 只锁该主播自己，不同主播可并行检查（互不阻塞）
+        async with self._check_lock_for(room.id):
             await self._check_room_works_inner(room)
 
     async def _check_room_works_inner(self, room: Room):
@@ -444,10 +487,48 @@ class WorksMonitor:
                 )
             return
         async with async_session() as session:
+            # P1-2: 只取「所属主播仍启用且仍订阅」的作品。
+            # 原实现取最前 100 条 pending，命中禁用/已删主播时只 `continue` 不更新状态，
+            # 于是前 100 条若全属被禁用主播，它们永远 pending、永远占住窗口，
+            # 后面正常主播的新作品**永久饥饿**（表现为"新作品一直待下载"）。
+            # 这里在查询层就过滤掉，并顺手把它们标记为 skipped，清出队列窗口。
             result = await session.execute(
-                select(Work).where(Work.status == "pending").order_by(Work.id).limit(100)
+                select(Work)
+                .join(Room, Work.creator_id == Room.id)
+                .where(
+                    Work.status == "pending",
+                    Room.enabled == True,
+                    Room.works_enabled == True,
+                )
+                .order_by(Work.id)
+                .limit(100)
             )
             pendings = result.scalars().all()
+
+            # 把"主播已禁用/已删/已取消订阅"的 pending 作品置为 failed，
+            # 避免它们无限占用队列表头（每次轮询都重新排在最前）
+            stale = (await session.execute(
+                select(Work.id)
+                .outerjoin(Room, Work.creator_id == Room.id)
+                .where(
+                    Work.status == "pending",
+                    or_(
+                        Room.id.is_(None),
+                        Room.enabled == False,
+                        Room.works_enabled == False,
+                    ),
+                )
+                .limit(200)
+            )).scalars().all()
+            if stale:
+                await session.execute(
+                    update(Work).where(Work.id.in_(stale)).values(
+                        status="failed",
+                        error_message="主播已禁用/已删除/已取消作品订阅，跳过下载",
+                    )
+                )
+                await session.commit()
+                logger.info(f"跳过 {len(stale)} 条属于已禁用主播的待下载作品，释放队列窗口")
         if not pendings:
             return
 
@@ -466,7 +547,28 @@ class WorksMonitor:
                 continue
 
             platform = room.platform
-            async with self._download_sems[platform]:
+            # P1-3: 平台名必须先白名单校验再取信号量。
+            # 原实现 `self._download_sems[platform]` 直接索引，字典只由 PLATFORM_CN
+            # （douyin/bilibili/kuaishou）初始化；库里若出现脏 platform（如 "Douyin"、
+            # 空串、历史遗留值）就抛 KeyError，被 _download_loop 的 except 每 10s 吞一次
+            # → **该平台所有下载静默停摆**，日志里只有一行"作品下载队列异常"。
+            if platform not in PLATFORM_CN:
+                logger.error(
+                    f"作品下载跳过：主播 {room.id} 平台值非法 {platform!r}"
+                    f"（应为 {list(PLATFORM_CN)}），请修正该主播记录"
+                )
+                async with async_session() as session:
+                    await session.execute(
+                        update(Work).where(Work.id == work.id).values(
+                            status="failed",
+                            error_message=f"主播平台值非法: {platform!r}",
+                        )
+                    )
+                    await session.commit()
+                continue
+            # setdefault 兜底：即使上面校验通过，也避免未来新增平台时再次 KeyError
+            sem = self._download_sems.setdefault(platform, asyncio.Semaphore(1))
+            async with sem:
                 # 双触发源（循环+重试端点）并发时，进信号量后重查状态，
                 # 已被另一个任务处理过（downloading/completed/failed）的跳过
                 async with async_session() as session:
@@ -510,16 +612,14 @@ class WorksMonitor:
             await session.commit()
 
         # 解析直链：优先列表时缓存的地址，否则二次解析（B站）
-        urls = []
-        if work.download_urls:
-            try:
-                urls = json.loads(work.download_urls)
-            except (ValueError, TypeError):
-                urls = []
+        #
+        # P1-4: 抖音/快手的 CDN 直链是带时效签名的，DB 里缓存的 download_urls 过期后
+        # 下载必然 403/失败。原实现只用缓存、从不重解析，于是作品**永久 failed**，
+        # 连 /retry 端点也走同一份过期 URL、永远失败。
+        # 现在：解析出可用地址 → 下载；若下载失败，清空缓存并重解析一次再试。
+        urls = self._cached_urls(work)
         if not urls:
-            info = WorkInfo(work_id=work.platform_work_id, work_type=work.work_type,
-                            title=work.title or "")
-            urls = await adapter.get_download_urls(info)
+            urls = await self._resolve_urls(adapter, work)
         if not urls:
             raise RuntimeError("未能获取下载地址（可能被风控或作品已删除）")
 
@@ -531,18 +631,41 @@ class WorksMonitor:
         title = recorder._sanitize_filename(work.title or "")[:60] or "untitled"
         base = f"{date_str}_{title}_{work.platform_work_id}"
 
-        if work.work_type == "images":
-            final_path = os.path.join(dir_path, f"{base}.zip")
-            size = await self._download_images(urls, final_path)
+        # P1-4: 首次尝试失败（多为缓存直链过期 403）时，清空缓存并重解析一次再试。
+        # 抖音/快手未覆写 get_download_urls，缓存过期后旧实现永久失败、/retry 也救不回来。
+        last_error = None
+        for attempt in (1, 2):
+            if work.work_type == "images":
+                final_path = os.path.join(dir_path, f"{base}.zip")
+                try:
+                    size = await self._download_images(urls, final_path)
+                    break
+                except Exception as e:
+                    last_error = e
+            else:
+                ext = ".mp4"
+                for u in urls[:1]:
+                    tail = urlparse(u).path.lower()
+                    for candidate in (".flv", ".ts", ".mkv"):
+                        if tail.endswith(candidate):
+                            ext = candidate
+                final_path = os.path.join(dir_path, f"{base}{ext}")
+                try:
+                    size = await self._download_video(urls, final_path)
+                    break
+                except Exception as e:
+                    last_error = e
+            if attempt == 1:
+                # 清空过期缓存，重解析后重试
+                logger.warning(
+                    f"作品 {work.platform_work_id} 首次下载失败，清空过期直链缓存后重试: {last_error}"
+                )
+                await self._clear_cached_urls(work)
+                urls = await self._resolve_urls(adapter, work)
+                if not urls:
+                    raise RuntimeError(f"重新解析下载地址失败: {last_error}")
         else:
-            ext = ".mp4"
-            for u in urls[:1]:
-                tail = urlparse(u).path.lower()
-                for candidate in (".flv", ".ts", ".mkv"):
-                    if tail.endswith(candidate):
-                        ext = candidate
-            final_path = os.path.join(dir_path, f"{base}{ext}")
-            size = await self._download_video(urls, final_path)
+            raise RuntimeError(str(last_error) if last_error else "下载失败")
 
         async with async_session() as session:
             await session.execute(
@@ -571,7 +694,11 @@ class WorksMonitor:
                 for u in urls:
                     async with self._client().stream("GET", u, headers=self._headers_for(u)) as resp:
                         if resp.status_code != 200:
-                            raise RuntimeError(f"下载HTTP {resp.status_code}: {u[:120]}")
+                            # P1-9: 不能把带签名 token 的 CDN 直链写进错误信息 ——
+                            # 它会被存进 Work.error_message 并由 /api/works 原样回显给前端，
+                            # 等于把时效性凭据暴露给任何能打开页面的人。只保留 host+路径前缀。
+                            safe = _redact_url(u)
+                            raise RuntimeError(f"下载HTTP {resp.status_code}: {safe}")
                         async for chunk in resp.aiter_bytes(256 * 1024):
                             f.write(chunk)
                             size += len(chunk)
@@ -632,12 +759,50 @@ class WorksMonitor:
         return client
 
     @staticmethod
+    def _cached_urls(work: Work) -> list:
+        """从 DB 缓存的 download_urls 解析直链列表（损坏 JSON 视为空）"""
+        if not work.download_urls:
+            return []
+        try:
+            urls = json.loads(work.download_urls)
+        except (ValueError, TypeError):
+            return []
+        return urls if isinstance(urls, list) else []
+
+    @staticmethod
+    async def _resolve_urls(adapter, work: Work) -> list:
+        """二次解析下载地址（B站等需额外 API 调用；抖音/快手回退到列表缓存）"""
+        info = WorkInfo(work_id=work.platform_work_id, work_type=work.work_type,
+                        title=work.title or "")
+        try:
+            return await adapter.get_download_urls(info) or []
+        except Exception as e:
+            logger.warning(f"二次解析下载地址失败 {work.platform_work_id}: {e}")
+            return []
+
+    @staticmethod
+    async def _clear_cached_urls(work: Work):
+        """清空过期直链缓存，使后续重解析生效"""
+        async with async_session() as session:
+            await session.execute(
+                update(Work).where(Work.id == work.id).values(download_urls=None)
+            )
+            await session.commit()
+        work.download_urls = None
+
+    @staticmethod
     def _headers_for(url: str) -> dict:
-        host = urlparse(url).netloc
-        for platform, headers in DOWNLOAD_HEADERS.items():
-            ref = urlparse(headers["Referer"]).netloc
-            if platform in host or ref.split(".")[0] in host:
-                return headers
+        """按目标 URL 的 host 选择该平台 CDN 需要的请求头。
+
+        P1-5: 原实现用 `platform in host or Referer首段 in host` 猜平台。
+        快手作品 CDN 的实际域名是 *.yximgs.com / *.kwaicdn.com —— 两个条件都不命中，
+        于是落到"只带 UA、无 Referer"，而快手 CDN 校验 Referer → 下载 403，
+        作品永久 failed。这里改为显式 host 后缀白名单（DOWNLOAD_HOSTS）。
+        """
+        host = (urlparse(url).netloc or "").lower()
+        for platform, domains in DOWNLOAD_HOSTS.items():
+            if any(host == d or host.endswith("." + d) for d in domains):
+                return DOWNLOAD_HEADERS[platform]
         return {"User-Agent": WORKS_UA}
 
 

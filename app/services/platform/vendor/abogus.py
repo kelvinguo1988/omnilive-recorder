@@ -376,6 +376,10 @@ class CryptoUtility:
         result_str = []
         index_b = self.big_array[1]
         initial_value = 0
+        # 显式初始化：value_e 在循环体末尾赋值、下一轮 index>0 时被读取（跨迭代依赖）。
+        # 首轮走 if 分支不读它，但静态检查会报 undefined name，且若未来改动循环结构
+        # （例如跳过 index==0）会变成真 NameError。这里显式置 0，行为与原来完全一致。
+        value_e = 0
 
         for index, char in enumerate(bytes_str):
             if index == 0:

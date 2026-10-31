@@ -3,11 +3,10 @@ import re
 import time
 import hashlib
 import logging
-from typing import Optional
 from urllib.parse import urlencode
 from app.services.platform.base import (
     BasePlatform, RoomInfo, PlatformFactory, UserInfo, WorkInfo,
-    WORKS_UA, WORKS_UA_CHROME_VER,
+    WORKS_UA,
 )
 
 logger = logging.getLogger(__name__)
@@ -90,6 +89,8 @@ class BilibiliPlatform(BasePlatform):
 
         except Exception as e:
             logger.error(f"获取B站房间信息失败 {url}: {e}")
+            # 探测失败（网络/风控/解析异常）：is_live 无意义，标记不可信（P0-8）
+            info.probe_ok = False
 
         return info
 
