@@ -31,6 +31,12 @@ class LiveMonitor:
         self._room_states: dict[int, dict] = {}
         # 串行化所有重连/换地址操作，避免刷新循环与断流重连同时对同一房间重启 ffmpeg
         self._reconnect_lock = asyncio.Lock()
+        # P0-7: 每房间一把锁，串行化 start/reconnect/finalize。
+        # 原实现场次状态"读 DB 标志→决策→动作"全程无锁，_finalize_session 可被
+        # 监控循环 / check_room_now / 手动停止 / _handle_finished_recordings 四路并发进入：
+        # 两路都 select 同一 recording 行、都对同一 final_path 跑 ffmpeg concat(-y)、
+        # 都在成功后删源 part → 输出被交错写坏、part 在读取中被删除。
+        self._room_locks: dict[int, asyncio.Lock] = {}
         # 上次清理旧系统日志的时间戳（P1-4，按天节流）
         self._last_log_cleanup: float = 0.0
         # 当日跨场次合并串行化（ffmpeg concat 可能持续数十秒到分钟级）
@@ -39,6 +45,25 @@ class LiveMonitor:
         self._bg_tasks: set = set()
         # 磁盘水位告警节流（避免每轮监控刷屏）
         self._last_disk_warn: float = 0.0
+        # P0-8: 连续探测失败计数。适配器把"网络失败/风控/空数据"与"真下播"都压成
+        # is_live=False，单次抖动就会被误判为下播、把在录场次切碎。这里要求连续
+        # N 次探测失败（或确认下播）才允许 finalize。
+        self._probe_fail_counts: dict[int, int] = {}
+        # 断流重连尝试次数（P1-12：避免磁盘满/流地址永久失效时每轮重启 ffmpeg）
+        self._reconnect_attempts: dict[int, int] = {}
+
+    def _room_lock(self, room_id: int) -> asyncio.Lock:
+        """取该房间的锁（惰性创建）"""
+        lock = self._room_locks.get(room_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._room_locks[room_id] = lock
+        return lock
+
+    # P0-8: 连续探测失败多少次后才认定"确实下播"（把在录场次结束）
+    PROBE_FAIL_THRESHOLD = 3
+    # P1-12: 同一场次断流重连最大尝试次数（超过则 finalize 并置 failed）
+    RECONNECT_MAX_ATTEMPTS = 5
 
     def _disk_over_limit_warn(self, context: str) -> bool:
         """磁盘超过 max_disk_usage 水位时告警（10 分钟节流），返回是否超限"""
@@ -79,6 +104,26 @@ class LiveMonitor:
     async def stop(self):
         """停止监控"""
         self._running = False
+
+        # P1-21: 必须先停 ffmpeg，再 cancel 监控循环。
+        # 原实现先 cancel _monitor_loop，若 _check_room 恰好停在 spawn 与登记/写库
+        # 之间被取消，关闭后就会留下一个未被跟踪的 ffmpeg 进程继续写文件。
+        # 先停录制进程可确保不会再有新的 spawn 发生（stop_recording 内部有锁）。
+        #
+        # P0-14 配套: 并发停止所有房间，而不是逐个 await。
+        # 原实现是串行 `for ... await stop_recording()`，N 路录制时最坏 N×10s；
+        # 并发后总预算约等于单个房间的停止时间（≈2×_STOP_GRACE），
+        # 使 compose 的 stop_grace_period=60s 在更多并发路数下仍然够用。
+        room_ids = list(recorder.active_processes.keys())
+        if room_ids:
+            results = await asyncio.gather(
+                *(recorder.stop_recording(rid) for rid in room_ids),
+                return_exceptions=True,
+            )
+            for rid, res in zip(room_ids, results):
+                if isinstance(res, Exception):
+                    logger.warning(f"停止房间 {rid} 录制进程失败: {res}")
+
         if self._task:
             self._task.cancel()
             try:
@@ -104,13 +149,6 @@ class LiveMonitor:
             except asyncio.TimeoutError:
                 logger.warning("后台合并任务未在 8s 内完成，跳过等待继续关闭")
             self._bg_tasks.clear()
-
-        # P0-3: 优雅停止所有进行中的 ffmpeg，让 mp4 正常写 moov atom，避免文件损坏
-        for room_id in list(recorder.active_processes.keys()):
-            try:
-                await recorder.stop_recording(room_id)
-            except Exception as e:
-                logger.warning(f"停止房间 {room_id} 录制进程失败: {e}")
 
         # 关闭共享平台适配器实例
         await platform_manager.reset()
@@ -275,72 +313,119 @@ class LiveMonitor:
         try:
             info: RoomInfo = await platform.get_room_info(room.url)
 
-            was_live = room.is_live
-            now = utcnow()
-
-            async with async_session() as session:
-                # 更新房间状态
-                update_data = {
-                    "is_live": info.is_live,
-                    "last_check_time": now,
-                    "title": info.title or room.title,
-                    # 手动填写的主播名优先（编辑弹窗承诺：清空才恢复自动探测），
-                    # 探测结果只回填空值
-                    "streamer_name": room.streamer_name or info.streamer_name,
-                    "room_id": info.room_id or room.room_id,
-                    # 主播平台用户ID：作品订阅的依据，检测到即回填（不清空已有值）
-                    "platform_user_id": info.owner_user_id or room.platform_user_id,
-                }
-
-                if info.is_live and not was_live:
-                    update_data["last_live_time"] = now
-                    await self._log(session, "info", "monitor",
-                                    f"房间 {room.streamer_name or room.url} 开播了: {info.title}")
-
-                await session.execute(
-                    update(Room).where(Room.id == room.id).values(**update_data)
+            # P0-8: 探测失败（网络/风控/解析异常）绝不当作"下播"处理 ——
+            # 适配器已用 probe_ok=False 标记，这里直接跳过本轮的**所有状态迁移**，
+            # 只累加失败计数；连续 N 次失败才允许走下播路径。
+            probe_ok = getattr(info, "probe_ok", True)
+            if not probe_ok:
+                fails = self._probe_fail_counts.get(room.id, 0) + 1
+                self._probe_fail_counts[room.id] = fails
+                logger.warning(
+                    f"房间 {room.id} 探测失败（第 {fails} 次），本轮不做状态迁移"
+                    f"（避免把网络抖动误判为下播而切断正在进行的录制）"
                 )
-                # P2-6: 提交后在同一 session 内重读最新 is_recording，
-                # 避免循环开始时的快照值在并发刷新/重连时误判
-                cur = (await session.execute(
-                    select(Room.is_recording).where(Room.id == room.id)
-                )).first()
-                await session.commit()
+                if fails < self.PROBE_FAIL_THRESHOLD:
+                    return
+                # 连续失败达到阈值：视为确认下播（否则会永远卡在录制中）
+                logger.error(
+                    f"房间 {room.id} 连续 {fails} 次探测失败，按已下播处理并结束当前场次"
+                )
+                info.is_live = False
+            else:
+                # 探测成功即清零失败计数
+                self._probe_fail_counts.pop(room.id, None)
 
-            room_is_recording = bool(cur[0]) if cur else False
-
-            # 状态变化处理
-            if info.is_live and not room_is_recording:
-                # 开播且未在录制 - 开启一场新录制（首个 part）
-                if not info.stream_url:
-                    logger.warning(f"房间 {room.id} 开播但未获取到流地址")
-                elif self._disk_over_limit_warn("新开播录制"):
-                    # 磁盘超水位：不再开新场次，等用户清理/调高阈值（下播最终化不受影响）
-                    pass
-                else:
-                    await self._start_recording(room, info)
-                    room.is_recording = True
-
-            elif not info.is_live and room_is_recording:
-                # 下播 - 结束当前场次（合并所有 part 为单个文件）
-                await self._finalize_session(room)
-                room.is_recording = False
-
-            # 断流重连检查：录制中但 ffmpeg 进程已退出（直播仍在进行）
-            if room_is_recording:
-                is_still_recording = await recorder.is_recording(room.id)
-                if not is_still_recording:
-                    if info.is_live and info.stream_url:
-                        # 断流但仍在直播 -> 续写同一场录制（追加新 part，不新建记录）
-                        logger.info(f"房间 {room.id} 录制进程退出，断流重连续写同一场录制")
-                        await self._reconnect_session(room, info)
-                    else:
-                        # 进程退出且已下播 -> 结束场次
-                        await self._finalize_session(room)
-                        room.is_recording = False
+            # P0-7: 本房间的状态迁移串行化，避免与 check_room_now / 手动停止 /
+            # _handle_finished_recordings 并发进入 _finalize_session
+            async with self._room_lock(room.id):
+                await self._check_room_locked(room, info)
 
         except Exception as e:
             logger.error(f"检查房间 {room.id} ({room.url}) 失败: {e}")
+
+    async def _check_room_locked(self, room: Room, info: RoomInfo):
+        """房间状态迁移执行体（已持该房间的锁）"""
+        was_live = room.is_live
+        now = utcnow()
+
+        async with async_session() as session:
+            # 更新房间状态
+            update_data = {
+                "is_live": info.is_live,
+                "last_check_time": now,
+                "title": info.title or room.title,
+                # 手动填写的主播名优先（编辑弹窗承诺：清空才恢复自动探测），
+                # 探测结果只回填空值
+                "streamer_name": room.streamer_name or info.streamer_name,
+                "room_id": info.room_id or room.room_id,
+                # 主播平台用户ID：作品订阅的依据，检测到即回填（不清空已有值）
+                "platform_user_id": info.owner_user_id or room.platform_user_id,
+            }
+
+            if info.is_live and not was_live:
+                update_data["last_live_time"] = now
+                await self._log(session, "info", "monitor",
+                                f"房间 {room.streamer_name or room.url} 开播了: {info.title}")
+
+            await session.execute(
+                update(Room).where(Room.id == room.id).values(**update_data)
+            )
+            # P2-6: 提交后在同一 session 内重读最新 is_recording，
+            # 避免循环开始时的快照值在并发刷新/重连时误判
+            cur = (await session.execute(
+                select(Room.is_recording).where(Room.id == room.id)
+            )).first()
+            await session.commit()
+
+        room_is_recording = bool(cur[0]) if cur else False
+
+        # 状态变化处理
+        if info.is_live and not room_is_recording:
+            # 开播且未在录制 - 开启一场新录制（首个 part）
+            if not info.stream_url:
+                logger.warning(f"房间 {room.id} 开播但未获取到流地址")
+            elif self._disk_over_limit_warn("新开播录制"):
+                # 磁盘超水位：不再开新场次，等用户清理/调高阈值（下播最终化不受影响）
+                pass
+            else:
+                await self._start_recording(room, info)
+                room.is_recording = True
+
+        elif not info.is_live and room_is_recording:
+            # 下播 - 结束当前场次（合并所有 part 为单个文件）
+            await self._finalize_session(room)
+            room.is_recording = False
+            self._reconnect_attempts.pop(room.id, None)
+
+        # 断流重连检查：录制中但 ffmpeg 进程已退出（直播仍在进行）
+        if room_is_recording:
+            is_still_recording = await recorder.is_recording(room.id)
+            if not is_still_recording:
+                if info.is_live and info.stream_url:
+                    # P1-12: 重连次数上限 + 磁盘水位检查，避免重启风暴
+                    attempts = self._reconnect_attempts.get(room.id, 0)
+                    if attempts >= self.RECONNECT_MAX_ATTEMPTS:
+                        logger.error(
+                            f"房间 {room.id} 断流重连已达 {attempts} 次上限，结束场次并标记失败"
+                        )
+                        await self._finalize_session(room)
+                        room.is_recording = False
+                        self._reconnect_attempts.pop(room.id, None)
+                    elif self._disk_over_limit_warn("断流重连"):
+                        logger.warning(f"房间 {room.id} 磁盘超限，暂不重连")
+                    else:
+                        # 断流但仍在直播 -> 续写同一场录制（追加新 part，不新建记录）
+                        self._reconnect_attempts[room.id] = attempts + 1
+                        logger.info(
+                            f"房间 {room.id} 录制进程退出，断流重连续写同一场录制"
+                            f"（第 {attempts + 1}/{self.RECONNECT_MAX_ATTEMPTS} 次）"
+                        )
+                        await self._reconnect_session(room, info)
+                else:
+                    # 进程退出且已下播 -> 结束场次
+                    await self._finalize_session(room)
+                    room.is_recording = False
+                    self._reconnect_attempts.pop(room.id, None)
 
     async def _start_recording(self, room: Room, info: RoomInfo):
         """开播/手动开始：开启一场新录制（一条 Recording + 首个 part）"""
@@ -484,7 +569,12 @@ class LiveMonitor:
                 logger.error(f"房间 {room.id} 重连失败: {rec.get('error')}")
 
     async def _finalize_session(self, room: Room, recording: Recording = None):
-        """停止一场录制：结束 ffmpeg，把所有 part 合并成最终单个文件。"""
+        """停止一场录制：结束 ffmpeg，把所有 part 合并成最终单个文件。
+
+        P0-7: 由调用方持有该房间的锁（_check_room_locked / _handle_finished_recordings /
+        手动停止入口）。这里再用 CAS 兜底：只有 `status='recording'` 的行才会被收尾，
+        并发第二次进入时 rowcount=0 直接返回，避免两路 concat 同一路径。
+        """
         # 结束底层 ffmpeg 进程（已退出则安全返回）
         await recorder.stop_recording(room.id)
 
@@ -510,11 +600,19 @@ class LiveMonitor:
             return
 
         final_path = os.path.join(settings.output_dir, recording.file_path or "")
-        parts_rel = json.loads(recording.part_paths or "[]") or []
+
+        # P1-13: part_paths 是历史/损坏 JSON 时不能让 ValueError 冒泡 —— 原实现异常被
+        # 外层吞掉后行仍停在 status=recording，每轮都重试 finalize，会话永不关闭。
+        parts_rel = self._parse_parts(recording.part_paths)
         files = self._expand_parts(parts_rel)
+
+        merge_error = None
+        merged_ok = True
 
         if not files:
             logger.warning(f"房间 {room.id} 没有可合并的录制文件")
+            merged_ok = False
+            merge_error = "没有可合并的录制文件（part 全部缺失）"
         elif len(files) == 1:
             # 单 part：若不是最终路径则移过去
             if os.path.abspath(files[0]) != os.path.abspath(final_path):
@@ -522,14 +620,26 @@ class LiveMonitor:
                     os.replace(files[0], final_path)
                 except OSError as e:
                     logger.error(f"移动单段文件失败: {e}")
+                    merged_ok = False
+                    merge_error = f"移动单段文件失败: {e}"
         else:
             # 多 part：合并为单个最终文件后删除碎片（P0-1：合并目标用原计划路径，
             # 保持在「主播/直播间/日期」目录内与命名，避免落到无主目录导致无法追溯）
-            merged = file_manager.merge_recordings(
-                [os.path.relpath(f, settings.output_dir) for f in files],
-                output_format=recording.format,
-                output_path=final_path,
-            )
+            #
+            # P0-4: 原实现直接同步调用 merge_recordings —— 其内部是
+            # subprocess.run(timeout=1800)，在事件循环里跑会把全站 API、监控循环、
+            # 作品下载全部阻塞最长 30 分钟。必须放线程池（与 _daily_merge_inner 一致）。
+            #
+            # P1-15: concat 必须与 _daily_merge 共用 _merge_lock —— 上一场的当日合并
+            # 正在删除旧分文件时，若本场 finalize 恰好把其中某个当作 concat 输入，
+            # 会得到"合并失败/半成品"。所有 ffmpeg concat 串行化。
+            async with self._merge_lock:
+                merged = await asyncio.to_thread(
+                    file_manager.merge_recordings,
+                    [os.path.relpath(f, settings.output_dir) for f in files],
+                    recording.format,
+                    final_path,
+                )
             if merged.get("success"):
                 final_path = merged["output_path"]
                 for f in files:
@@ -539,37 +649,83 @@ class LiveMonitor:
                         pass
                 self._clean_empty_dirs(os.path.dirname(merged["output_path"]))
             else:
-                logger.error(f"房间 {room.id} 合并碎片失败: {merged.get('error')}")
+                merged_ok = False
+                merge_error = merged.get("error") or "ffmpeg 合并失败"
+                logger.error(f"房间 {room.id} 合并碎片失败: {merge_error}")
 
         size = os.path.getsize(final_path) if os.path.exists(final_path) else 0
         now = utcnow()
         duration = (now - recording.started_at).total_seconds() if recording.started_at else 0
 
+        # P0-1: 只有"确实产出了非空最终文件"才算 completed。
+        # 原实现无论合并成败都写 status=completed + part_paths=None + file_size=0，
+        # 于是碎片文件仍在磁盘却**再无任何 DB 记录指向它们**（_expand_parts 只在
+        # finalize 内部用）—— 这些文件再也无法被合并/同步/列出，属不可恢复的数据丢失。
+        # 失败时保留 part_paths 供后续重试合并，并如实标记 failed + 原因。
+        if merged_ok and size > 0:
+            new_values = {
+                "status": "completed",
+                "file_path": self._rel(final_path),
+                "file_name": os.path.basename(final_path),
+                "file_size": size,
+                "duration": duration,
+                "ended_at": now,
+                "part_paths": None,
+                "error_message": None,
+            }
+        else:
+            tail = recorder.last_stderr(room.id)
+            reason = merge_error or "最终文件为空"
+            if tail:
+                reason = f"{reason} | ffmpeg 尾部输出: {tail[-300:]}"
+            new_values = {
+                "status": "failed",
+                "file_path": self._rel(final_path),
+                "file_name": os.path.basename(final_path),
+                "file_size": size,
+                "duration": duration,
+                "ended_at": now,
+                # 关键：保留碎片引用，使它们仍可被列出/同步/重试合并
+                "part_paths": json.dumps(parts_rel) if parts_rel else None,
+                "error_message": reason[:500],
+            }
+            logger.error(f"房间 {room.id} 场次收尾失败，保留 {len(parts_rel)} 个 part 引用: {reason}")
+
         async with async_session() as session:
-            await session.execute(
-                update(Recording).where(Recording.id == recording.id).values(
-                    status="completed",
-                    file_path=self._rel(final_path),
-                    file_name=os.path.basename(final_path),
-                    file_size=size,
-                    duration=duration,
-                    ended_at=now,
-                    part_paths=None,
-                )
+            # P0-7 CAS：仅当该行仍是 recording 时才收尾，并发第二路 rowcount=0 直接跳过
+            res = await session.execute(
+                update(Recording).where(
+                    Recording.id == recording.id,
+                    Recording.status == "recording",
+                ).values(**new_values)
             )
+            if res.rowcount == 0:
+                logger.warning(
+                    f"房间 {room.id} 场次 {recording.id} 已被其他路径收尾，跳过重复 finalize"
+                )
+                await session.execute(
+                    update(Room).where(Room.id == room.id).values(is_recording=False)
+                )
+                await session.commit()
+                return
             await session.execute(
                 update(Room).where(Room.id == room.id).values(is_recording=False)
             )
             await session.commit()
 
-        logger.info(f"房间 {room.id} 录制结束，最终文件: {final_path}")
-        await self._notify(f"录制结束: {room.streamer_name or room.url}")
+        if new_values["status"] == "completed":
+            logger.info(f"房间 {room.id} 录制结束，最终文件: {final_path}")
+            await self._notify(f"录制结束: {room.streamer_name or room.url}")
 
-        # 当日跨场次自动合并（后台执行，不阻塞监控循环）
-        fmt = recording.format or settings.record_format
-        task = asyncio.create_task(self._daily_merge(room.id, os.path.dirname(final_path), fmt))
-        self._bg_tasks.add(task)
-        task.add_done_callback(self._bg_tasks.discard)
+            # 当日跨场次自动合并（后台执行，不阻塞监控循环）
+            fmt = recording.format or settings.record_format
+            task = asyncio.create_task(self._daily_merge(room.id, os.path.dirname(final_path), fmt))
+            self._bg_tasks.add(task)
+            task.add_done_callback(self._bg_tasks.discard)
+        else:
+            await self._notify(
+                f"录制收尾失败: {room.streamer_name or room.url}（碎片已保留，可在文件管理中手动合并）"
+            )
 
     async def _daily_merge(self, room_id: int, dir_path: str, fmt: str):
         """当日跨场次合并：同目录下该主播多段已完成录制合并为一个文件。
@@ -628,7 +784,6 @@ class LiveMonitor:
         streamer_dir = folder or os.path.basename(os.path.dirname(dir_path))
         date_compact = os.path.basename(dir_path).replace("-", "")
         final_name = f"{streamer_dir}_{date_compact}_合并.{fmt}"
-        final_path = os.path.join(dir_path, final_name)
         # 隐藏临时产物（点前缀不会出现在文件列表），成功后原子改名；同名旧合并文件
         # 作为输入之一会在改名时被安全覆盖（ffmpeg 已先完成读取）。
         # 注意 dir_path 是相对 output_dir 的路径，磁盘操作必须转绝对路径
@@ -685,13 +840,58 @@ class LiveMonitor:
         )
         await self._notify(f"当日合并完成: {streamer_dir} {final_name}")
 
+    # ---------------------------------------------------------------- 公开 API
+    # P1-30: HTTP 层不应直接调用服务的私有方法。原 routers/rooms.py 与
+    # routers/system.py 直接调 monitor._get_platform / _start_recording /
+    # _stop_recording / _reset_platform_cache，服务边界形同虚设 ——
+    # 改 monitor 内部实现会直接破坏 API 行为且无编译期提示。
+    # 这里提供语义化的公开方法，私有实现保持不变。
+
+    async def get_platform(self, platform_name: str):
+        """获取平台适配器实例（供 API 层使用）"""
+        return await self._get_platform(platform_name)
+
+    async def reset_platform_cache(self):
+        """清空平台适配器缓存（修改 Cookie/代理/URL 后调用）"""
+        await self._reset_platform_cache()
+
+    async def start_recording(self, room: Room, info: RoomInfo):
+        """手动开始一场录制（供 API 层使用）"""
+        await self._start_recording(room, info)
+
+    async def stop_recording(self, room: Room):
+        """停止并最终化当前场次（供 API 层使用）
+
+        与监控循环共用同一把 per-room 锁，避免 API 手动停止与循环判定下播并发 finalize。
+        """
+        async with self._room_lock(room.id):
+            await self._finalize_session(room)
+
     async def _stop_recording(self, room: Room, update_status: bool = True):
-        """停止录制（向下兼容 router 调用）：最终化当前场次。"""
+        """[已弃用] 旧私有别名，保留仅为兼容；新代码请用 stop_recording()。"""
         await self._finalize_session(room)
 
     def _rel(self, path: str) -> str:
         """转为相对 output_dir 的路径用于存储"""
         return os.path.relpath(path, settings.output_dir)
+
+    @staticmethod
+    def _parse_parts(raw: str) -> list:
+        """安全解析 part_paths JSON（P1-13）。
+
+        历史数据可能为空串/损坏 JSON；原实现直接 json.loads，ValueError 被外层吞掉后
+        该行仍停在 status=recording，每轮都重试 finalize，会话永不关闭。
+        """
+        if not raw:
+            return []
+        try:
+            parts = json.loads(raw)
+        except (ValueError, TypeError):
+            logger.warning(f"part_paths 不是合法 JSON，按空处理: {raw[:120]}")
+            return []
+        if not isinstance(parts, list):
+            return []
+        return [p for p in parts if isinstance(p, str) and p]
 
     def _expand_parts(self, parts_rel: list) -> list:
         """把存储的 part 路径展开为实际文件列表（处理 segment 的 %04d 通配）"""
@@ -707,10 +907,16 @@ class LiveMonitor:
         return files
 
     def _clean_empty_dirs(self, path: str):
-        """向上清理空目录（仅清理 output_dir 内的日期/主播目录）"""
+        """向上清理空目录（仅清理 output_dir 内的日期/主播目录）
+
+        P1-22: 前缀必须带分隔符比较。原写法 `parent.startswith(base)` 在
+        output_dir 为兄弟路径前缀时（/app/recordings 与 /app/recordings_evil）
+        会误判并可能向上 rmdir 到 output_dir 之外。
+        """
         base = os.path.abspath(settings.output_dir)
+        prefix = base.rstrip(os.sep) + os.sep
         parent = os.path.abspath(path)
-        while parent and parent.startswith(base) and parent != base:
+        while parent and parent != base and parent.startswith(prefix):
             try:
                 if not os.listdir(parent):
                     os.rmdir(parent)
@@ -744,7 +950,10 @@ class LiveMonitor:
                 )
                 recording = rec_res.scalar_one_or_none()
                 if recording:
-                    await self._finalize_session(room, recording)
+                    # P0-7: 与 _check_room_locked 共用同一把 per-room 锁，
+                    # 避免"监控循环正在 finalize"与"这里兜底 finalize"并发执行
+                    async with self._room_lock(room_id):
+                        await self._finalize_session(room, recording)
 
     async def _notify(self, message: str):
         """发送通知"""
