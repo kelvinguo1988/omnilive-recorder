@@ -14,7 +14,6 @@
 import asyncio
 import os
 import shutil
-import time
 import logging
 
 from sqlalchemy import select
@@ -134,18 +133,35 @@ class SyncService:
 
     @staticmethod
     def _copy_if_needed(src: str, dst: str) -> tuple:
-        """增量复制：目标存在且大小一致跳过。返回 (copied, skipped)；失败 copied=-1"""
+        """增量复制：目标存在且大小一致跳过。返回 (copied, skipped)；失败 copied=-1
+
+        P1-18: 原实现失败时**不清理** dst.part —— NAS 断连/中断会让 .part 在同步根
+        永久累积（全项目只有 works 的 .part 有清理逻辑）；且 copy2 返回即视为完整，
+        无二次大小校验。这里补 finally 清理 + replace 前校验大小。
+        """
+        part = dst + ".part"
         try:
             if os.path.isfile(dst) and os.path.getsize(dst) == os.path.getsize(src):
                 return 0, 1
             os.makedirs(os.path.dirname(dst), exist_ok=True)
-            part = dst + ".part"
             shutil.copy2(src, part)
+            # 复制后校验大小一致（NAS/网络文件系统上 copy 可能被截断）
+            if os.path.getsize(part) != os.path.getsize(src):
+                raise OSError(
+                    f"复制后大小不一致（src={os.path.getsize(src)} part={os.path.getsize(part)}）"
+                )
             os.replace(part, dst)
             return 1, 0
         except Exception as e:
             logger.error(f"同步文件失败 {src} -> {dst}: {e}")
             return -1, 0
+        finally:
+            # 无论成败都清理临时文件，避免 .part 永久残留
+            try:
+                if os.path.exists(part):
+                    os.remove(part)
+            except OSError:
+                pass
 
 
 # 全局同步服务实例

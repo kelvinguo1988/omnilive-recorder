@@ -194,7 +194,15 @@ def _migrate_on_disk(owners: dict, holders: dict) -> dict:
             for name in filenames:
                 src_abs = os.path.join(dirpath, name)
                 rel = os.path.relpath(src_abs, base)
-                if name.startswith("."):
+                # P1-20: 旧布局下的点前缀临时产物（.merge_tmp_*、.part）既不迁移也从不清理，
+                # 会永久滞留并让 _prune_empty_legacy_dirs 删不掉这些旧目录。
+                # 这些文件是半成品/临时文件，无完整数据，直接删除。
+                if name.startswith(".") or name.endswith(".part"):
+                    try:
+                        os.remove(src_abs)
+                        logger.info(f"清理旧布局临时文件: {rel}")
+                    except OSError:
+                        pass
                     continue
                 new_rel = _new_rel(rel, owners, holders)
                 if not new_rel:
@@ -230,6 +238,11 @@ async def migrate_legacy_layout() -> dict:
             stats.update(await asyncio.to_thread(_migrate_on_disk, owners, holders))
 
         # DB 路径回写：只在新位置确实有文件时才改，避免指向不存在的文件
+        #
+        # P1-19: 原实现只判 `os.path.isfile(target)`。而 _move_file 在"目标已存在但
+        # 大小不同"时返回 False（保留源文件在原位），此时目标路径上确实有文件、但那是
+        # 一个截断/错误文件 —— 原逻辑会把 DB 改写到这个坏文件上，完整文件孤留旧目录，
+        # 下载/同步取到坏文件。这里改为要求"新路径文件大小与源文件一致"才改库。
 
         def _rewrite(rel):
             if not rel:
@@ -240,8 +253,29 @@ async def migrate_legacy_layout() -> dict:
             target = os.path.join(base, new_rel)
             if "%04d" in new_rel:
                 # 分段 part 存的是 ffmpeg 模板路径（含 %04d），实际文件按通配核对
-                return new_rel if glob.glob(target.replace("%04d", "*")) else None
-            return new_rel if os.path.isfile(target) else None
+                matches = glob.glob(target.replace("%04d", "*"))
+                if not matches:
+                    return None
+                # 与源模板同目录下的实际文件做大小一致性核对（源已搬走时无从比对，
+                # 此时以"目标确实存在"为准）
+                src_abs = os.path.join(base, rel)
+                if os.path.exists(src_abs) and os.path.getsize(src_abs) != os.path.getsize(matches[0]):
+                    return None
+                return new_rel
+            if not os.path.isfile(target):
+                return None
+            # 源文件若还在原位（说明搬迁失败/大小不符），必须比对大小
+            src_abs = os.path.join(base, rel)
+            if os.path.isfile(src_abs):
+                try:
+                    if os.path.getsize(src_abs) != os.path.getsize(target):
+                        logger.warning(
+                            f"归档迁移跳过 DB 回写：{rel} 与目标 {new_rel} 大小不一致"
+                        )
+                        return None
+                except OSError:
+                    return None
+            return new_rel
 
         async with async_session() as session:
             for row in (await session.execute(select(Recording))).scalars().all():

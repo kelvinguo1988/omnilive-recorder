@@ -6,7 +6,6 @@ import subprocess
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 from fastapi import HTTPException
 from app.config import settings
 from app.services import archive
@@ -154,8 +153,13 @@ class FileManager:
             logger.info(f"已删除文件: {rel_path}")
 
             # 清理空目录
+            # P1-22: 前缀必须带分隔符比较。原写法 `parent.startswith(self.output_dir)`
+            # 在 output_dir 为兄弟路径前缀时（/app/recordings 与 /app/recordings_evil）
+            # 会误判，可能向上 rmdir 到 output_dir 之外。
+            base_abs = os.path.abspath(self.output_dir)
+            prefix = base_abs.rstrip(os.sep) + os.sep
             parent = os.path.dirname(full_path)
-            while parent and parent.startswith(self.output_dir) and parent != self.output_dir:
+            while parent and parent != base_abs and parent.startswith(prefix):
                 try:
                     if not os.listdir(parent):
                         os.rmdir(parent)
@@ -291,7 +295,13 @@ class FileManager:
             out_path = os.path.join(out_dir, out_name)
 
         # 写 ffmpeg concat 列表文件（放在输出文件同目录，避免跨目录权限问题）
-        list_path = os.path.join(os.path.dirname(out_path), f"_list_{ts}.txt")
+        #
+        # P1-16: 原文件名 `_list_{ts}.txt` 只到**秒级**且无点前缀 ——
+        # 同一目录同一秒发生两次合并时会共用同一列表文件（一边写一边被另一 ffmpeg 读），
+        # 解析错乱；且该文件不带点前缀，会被文件列表/UI 当成正常文件列出。
+        # 改用 uuid + 点前缀，并在 finally 里无条件删除。
+        import uuid
+        list_path = os.path.join(os.path.dirname(out_path), f"._list_{ts}_{uuid.uuid4().hex[:8]}.txt")
         with open(list_path, "w", encoding="utf-8") as f:
             for p in abs_paths:
                 # _sanitize_filename 不清洗撇号, 标题含 ' 的文件名会让 concat
@@ -307,20 +317,35 @@ class FileManager:
         cmd.append(out_path)
 
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+            # stdin=DEVNULL: 避免子进程误读父进程 stdin 卡住
+            proc = subprocess.run(cmd, capture_output=True, text=True,
+                                  timeout=1800, stdin=subprocess.DEVNULL)
         except subprocess.TimeoutExpired:
+            # P1-17: 超时/失败必须同时清理半成品输出，否则截断/0 字节的 mp4 会留在磁盘，
+            # 后续被当日合并当成有效输入、也被 UI 当成可播放录制
             self._safe_remove(list_path)
+            self._safe_remove(out_path)
             return {"success": False, "error": "合并超时 (超过 30 分钟)"}
         except Exception as e:
             self._safe_remove(list_path)
+            self._safe_remove(out_path)
             return {"success": False, "error": str(e)}
-
-        self._safe_remove(list_path)
+        finally:
+            self._safe_remove(list_path)
 
         if proc.returncode != 0:
+            # P1-17: 非零退出同样清掉截断产物
+            self._safe_remove(out_path)
             return {"success": False, "error": (proc.stderr or "ffmpeg 执行失败")[-600:]}
 
-        size = os.path.getsize(out_path)
+        # P1-17: 产物非空才算成功（0 字节文件会让上层误判为已完成）
+        try:
+            size = os.path.getsize(out_path)
+        except OSError as e:
+            return {"success": False, "error": f"合并产物不存在: {e}"}
+        if size <= 0:
+            self._safe_remove(out_path)
+            return {"success": False, "error": "合并产物为 0 字节"}
         self.invalidate_cache("file_list")
         self.invalidate_cache("disk_usage")
         return {
