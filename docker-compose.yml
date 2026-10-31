@@ -8,6 +8,19 @@ services:
         - PIP_INDEX=https://mirrors.aliyun.com/pypi/simple/
     container_name: live-recorder
     restart: unless-stopped
+    # P0-14: 停止宽限期必须覆盖「优雅关闭」的完整预算，否则 Docker 会在默认 10s 后
+    # 直接 SIGKILL，ffmpeg 来不及写 mp4 的 moov atom → 录像文件损坏（P0-3 的回归点）。
+    # 预算拆解（monitor.stop() 当前实现，注意顺序是「先停 ffmpeg 再 cancel 监控循环」）：
+    #   1) 逐个房间停 ffmpeg：SIGTERM → wait_for(process.wait(), timeout=10)
+    #      串行实现下最坏为 10s×N（N = 同时录制路数）
+    #   2) 等当日合并等后台任务：asyncio.wait_for(gather, timeout=8)          ≤ 8s
+    #   3) platform_manager.reset() 关闭共享适配器                            ≈ 1s
+    # 最坏串行口径 = 10×N + 8 + 1。60s 可覆盖 5 路以内并发录制；
+    # 若 recorder 停止改为并发 gather 并把单项超时缩短（审查报告建议的另一条路），
+    # 实际预算会远小于此值，60s 依然够用且有富余。
+    # 注意：本值必须 ≥（ffmpeg 停止预算 + 后台任务等待预算 + 余量）。
+    # 调小 recorder/monitor 的 timeout 时应复核这里；同时录制路数上调（N>5）需重新核算。
+    stop_grace_period: 60s
     ports:
       - "8000:8000"
     volumes:
@@ -33,6 +46,15 @@ services:
         reservations:
           cpus: '0.5'
           memory: 256M
+    # 日志上限：应用只用 stdout logging（main.py 的 logging.basicConfig，无 FileHandler），
+    # 全部日志落到 Docker 的 json-file driver。该 driver 默认无 max-size，7×24 长时间运行
+    # 下宿主机日志文件可持续增长到 GB 级，甚至写满系统盘拖垮 NAS。
+    # 这里限制单文件 10m、最多保留 3 个（单服务日志占用上限约 30m），滚动后自动丢弃最旧文件。
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
       interval: 30s

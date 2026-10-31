@@ -1,16 +1,25 @@
 name: Build and Push Docker Image
 
-# 触发条件：推送到 main 分支，或手动触发
+# 触发条件：推送到 main 分支、PR 到 main（只构建不推送，用于提前验证），或手动触发
 on:
   push:
     branches: ["main"]
+  pull_request:
+    branches: ["main"]
   workflow_dispatch:
 
-# 赋予推送 GitHub Packages (GHCR) 所需的最小权限
+# 赋予推送 GitHub Packages (GHCR) 所需的最小权限。
+# 这里不需要 actions: read —— checkout / buildx / login / metadata 均不依赖读取
+# Actions 元数据；只在确需查询运行记录时才加，避免权限面被无谓放大。
 permissions:
   contents: read
   packages: write
-  actions: read
+
+# P1-27: 并发去重。同一 ref 连续推送时取消上一轮未完成的任务，
+# 避免两次构建同时抢写 latest 标签（后启动的覆盖先完成的，产物不确定）。
+concurrency:
+  group: ${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   REGISTRY: ghcr.io
@@ -19,14 +28,24 @@ env:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    # 超时保护：多架构（amd64+arm64）构建在冷缓存下可能耗时较长，
+    # 给 60 分钟上限，避免 runner 卡死占用额度直到 GitHub 默认 6h 上限。
+    timeout-minutes: 60
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Set up QEMU
+        # P1-27: 跨架构构建必需。GitHub runner 是 amd64，构建 arm64 镜像层
+        # 必须靠 QEMU 用户态模拟（buildx 会用到下面注册的 binfmt）。
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # PR 场景不登录：fork 的 PR 拿不到 packages: write，且本来也不推送。
       - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -41,6 +60,8 @@ jobs:
           tags: |
             # 分支名，如 main
             type=ref,event=branch
+            # PR 号，如 pr-12
+            type=ref,event=pr
             # 提交短 sha，如 sha-1a2b3c4
             type=sha,prefix=sha-,format=short
             # 仅默认分支打 latest
@@ -50,7 +71,14 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: true
+          # P1-27: 必须同时产出 amd64 与 arm64。README 主推 QNAP，而 QNAP 大量在售
+          # 型号（TS-133/TS-233/TS-433 等）是 arm64；只产出 amd64 时用户 docker pull
+          # 会直接报 "no matching manifest for linux/arm64"。
+          # 注：多架构 + push 要求使用 docker-container driver（setup-buildx-action
+          # 默认即是），且不能 load 到本地 docker，故此处不设 load。
+          platforms: linux/amd64,linux/arm64
+          # PR 只构建验证，不推送
+          push: ${{ github.event_name != 'pull_request' }}
           # 不传 build args → Dockerfile 使用官方源(境外 runner 最快)
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

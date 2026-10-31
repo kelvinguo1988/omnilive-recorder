@@ -1,12 +1,27 @@
-__pycache__
-*.pyc
-*.pyo
+# 说明：Docker 的 .dockerignore 模式按「相对构建上下文的完整路径」匹配，
+# 写成 `__pycache__` 只命中根级目录，命中不了 app/__pycache__。
+# 因此 Python 字节码与缓存目录一律使用递归（**/）模式。
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+
 .git
+.github
 .gitignore
 *.md
+
+# 运行时数据：由 compose 卷挂载提供，不应烘进镜像
 data/
 recordings/
 logs/
+
+# 本地虚拟环境 / 编辑器 / 环境变量
 .venv
 venv
+.idea
+.vscode
 .env
+.DS_Store
