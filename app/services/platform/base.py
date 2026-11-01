@@ -51,6 +51,12 @@ class WorkInfo:
 
     download_urls: 视频为 1 个无水印地址；图集为 N 个图片地址（顺序）。
     publish_ts: 发布时间 unix 秒（未知为 0）。
+
+    合集/多P 相关字段（仅「按合集下载」使用，普通作品订阅时保持默认值）：
+      episode_index  集号（从 1 起）；0 = 不属于任何合集
+      collection_key 合集去重键，如 bili:season:415241 / bili:multipart:BV1xx
+      collection_title 合集名称
+      part_index     平台内的分P号（B站 ?p=N）；0 = 无分P概念
     """
     work_id: str = ""
     work_type: str = "video"
@@ -59,6 +65,24 @@ class WorkInfo:
     duration: float = 0
     download_urls: list = field(default_factory=list)
     cover_url: str = ""
+    episode_index: int = 0
+    collection_key: str = ""
+    collection_title: str = ""
+    part_index: int = 0
+
+
+@dataclass
+class CollectionInfo:
+    """一个「合集 / 多P / 单视频」的解析结果
+
+    kind: collection(真合集, 跨BV) / multipart(同一BV的多个分P) / single(单视频)
+    """
+    kind: str = "single"
+    title: str = ""
+    collection_key: str = ""
+    items: list = field(default_factory=list)   # list[WorkInfo]
+    platform: str = ""
+    total: int = 0
 
 
 class BasePlatform(ABC):

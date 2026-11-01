@@ -1,4 +1,5 @@
 """Bilibili直播适配器"""
+import asyncio
 import re
 import time
 import hashlib
@@ -6,7 +7,7 @@ import logging
 from urllib.parse import urlencode
 from app.services.platform.base import (
     BasePlatform, RoomInfo, PlatformFactory, UserInfo, WorkInfo,
-    WORKS_UA,
+    CollectionInfo, WORKS_UA,
 )
 
 logger = logging.getLogger(__name__)
@@ -371,6 +372,252 @@ class BilibiliPlatform(BasePlatform):
             logger.error(f"解析B站下载地址失败 {work.work_id}: {e}")
             return []
 
+    # ---------------------------------------------------------------- 合集/多P
+
+    async def parse_collection(self, url: str, include_all: bool = True) -> "CollectionInfo":
+        """把「合集 / 多P / 单视频」链接解析成统一的 CollectionInfo 清单。
+
+        返回值 items 里每项是一个 WorkInfo，已带 episode_index / collection_key /
+        part_index；多P 与单视频的 cid 当场就有，真合集的列表接口不返回 cid，
+        由 ensure_cid() 在下载前补一次（不用每次解析都对 28 集各补一次请求）。
+
+        解析失败抛 RuntimeError（带平台错误信息），由上层转成 400 给前端。
+        """
+        bvid = _bili_extract_bvid(url)
+        aid = _bili_extract_aid(url)
+        if not bvid and not aid:
+            raise RuntimeError("无法从链接中识别 B站 BV 号或 av 号")
+
+        key = {"bvid": bvid} if bvid else {"aid": aid}
+        resp = await self.client.get(
+            "https://api.bilibili.com/x/web-interface/view",
+            params=key,
+            headers=await self._api_headers(),
+        )
+        vdata = resp.json()
+        if vdata.get("code") != 0:
+            raise RuntimeError(
+                f"B站视频信息接口失败: code={vdata.get('code')} {vdata.get('message', '')}"
+            )
+        vd = vdata.get("data") or {}
+        real_bvid = vd.get("bvid") or bvid
+        real_aid = vd.get("aid") or aid
+        title = (vd.get("title") or "").strip()
+        season = vd.get("ugc_season") or {}
+        pages = vd.get("pages") or []
+
+        # 情况 A：真·合集（跨多个 BV）
+        if season.get("id") and include_all:
+            sid = season["id"]
+            ctitle = (season.get("title") or title).strip()
+            archives, pageno = [], 1
+            while True:
+                resp = await self.client.get(
+                    "https://api.bilibili.com/x/polymer/web-space/seasons_archives_list",
+                    params={"mid": 0, "season_id": sid, "sort_reverse": "false",
+                            "page_num": pageno, "page_size": 30},
+                    headers=await self._api_headers(),
+                )
+                d = resp.json()
+                if d.get("code") != 0:
+                    raise RuntimeError(
+                        f"合集列表接口失败: code={d.get('code')} {d.get('message', '')}"
+                    )
+                d = d.get("data") or {}
+                batch = d.get("archives") or []
+                if not batch:
+                    break
+                archives += batch
+                total = (d.get("page") or {}).get("total") or 0
+                logger.info(f"B站合集 season={sid} 第 {pageno} 页 +{len(batch)}"
+                            f"（累计 {len(archives)}/{total or '?'}）")
+                if total and len(archives) >= total:
+                    break
+                if len(batch) < 30:
+                    break
+                pageno += 1
+                # 每页之间留间隔，避免触发风控
+                await asyncio.sleep(0.4)
+
+            # 链接里带 ?p=N 时只取第 N 集（与「多P」行为保持一致的用户预期）：
+            # 合集键仍是整个 season，但清单只回一集，前端表现为"解析出 1 集"。
+            want_page = _bili_extract_page(url)
+            listed = archives
+            if want_page and 1 <= want_page <= len(archives):
+                listed = [archives[want_page - 1]]
+
+            items = []
+            for i, a in enumerate(listed, 1):
+                # 集号必须用**合集内真实序号**，不能因为只要一集就变成 1
+                real_idx = (want_page if want_page and listed is not archives else i)
+                item = WorkInfo(
+                    work_id=a.get("bvid") or "",
+                    title=(a.get("title") or "").strip(),
+                    publish_ts=int(a.get("pubdate") or a.get("ctime") or 0),
+                    duration=float(a.get("duration") or 0),
+                    cover_url=a.get("pic") or "",
+                    episode_index=real_idx,
+                    collection_key=f"bili:season:{sid}",
+                    collection_title=ctitle,
+                    part_index=1,
+                )
+                item.cid = 0  # 列表不返回 cid，下载前再补（见 ensure_cid）
+                items.append(item)
+            return CollectionInfo(kind="collection", title=ctitle,
+                                  collection_key=f"bili:season:{sid}",
+                                  items=items, platform="bilibili", total=len(items))
+
+        # 情况 B：多P（同一个 BV 的多个分P）
+        if len(pages) > 1:
+            ckey = f"bili:multipart:{real_bvid}"
+            items = []
+            for p in pages:
+                item = WorkInfo(
+                    work_id=real_bvid,
+                    title=(p.get("part") or "").strip() or f"P{p.get('page')}",
+                    publish_ts=int(p.get("ctime") or vd.get("pubdate") or 0),
+                    duration=float(p.get("duration") or 0),
+                    cover_url=vd.get("pic") or "",
+                    episode_index=int(p.get("page") or 1),
+                    collection_key=ckey,
+                    collection_title=title,
+                    part_index=int(p.get("page") or 1),
+                )
+                item.cid = int(p.get("cid") or 0)
+                items.append(item)
+            return CollectionInfo(kind="multipart", title=title, collection_key=ckey,
+                                  items=items, platform="bilibili", total=len(items))
+
+        # 情况 C：单视频
+        item = WorkInfo(
+            work_id=real_bvid,
+            title=title,
+            publish_ts=int(vd.get("pubdate") or vd.get("ctime") or 0),
+            duration=float(vd.get("duration") or 0),
+            cover_url=vd.get("pic") or "",
+            episode_index=1,
+            collection_key=f"bili:single:{real_bvid}",
+            collection_title=title,
+            part_index=1,
+        )
+        item.cid = int(vd.get("cid") or 0)
+        item.aid = int(real_aid or 0)
+        return CollectionInfo(kind="single", title=title,
+                              collection_key=f"bili:single:{real_bvid}",
+                              items=[item], platform="bilibili", total=1)
+
+    async def ensure_cid(self, item: WorkInfo) -> int:
+        """补齐某集的 cid（合集枚举时列表接口不返回 cid，需按 bvid 补一次）"""
+        cid = int(getattr(item, "cid", 0) or 0)
+        if cid:
+            return cid
+        resp = await self.client.get(
+            "https://api.bilibili.com/x/player/pagelist",
+            params={"bvid": item.work_id, "jsonp": "jsonp"},
+            headers=await self._api_headers(),
+        )
+        d = resp.json()
+        if d.get("code") != 0:
+            raise RuntimeError(f"取分P列表失败: {d.get('message', '')}")
+        pl = d.get("data") or []
+        # 多P时按 part_index 选，否则取第一条
+        target = item.part_index or 1
+        for p in pl:
+            if int(p.get("page") or 0) == target:
+                item.cid = int(p.get("cid") or 0)
+                return item.cid
+        if pl:
+            item.cid = int(pl[0].get("cid") or 0)
+            return item.cid
+        raise RuntimeError("该视频没有可用的分P")
+
+    async def resolve_collection_item_urls(self, item: WorkInfo,
+                                           prefer_dash: bool = None,
+                                           qn: int = 127) -> list:
+        """解析合集内某一集的直链。
+
+        prefer_dash=None 时自动判断：有登录态 Cookie 走 DASH（画质上限更高），
+        否则走 html5 合流 mp4（免登录 720P~1080P，单文件、无需 ffmpeg）。
+        DASH 返回 [video_url, audio_url]；html5 返回 [mp4_url]。下载端按长度判断。
+        """
+        cid = await self.ensure_cid(item)
+        if not cid:
+            raise RuntimeError("缺少 cid，无法解析播放地址")
+        aid = int(getattr(item, "aid", 0) or 0)
+        if not aid:
+            # 合集列表给了 aid，但保险起见用 bvid 反查一次
+            resp = await self.client.get(
+                "https://api.bilibili.com/x/web-interface/view",
+                params={"bvid": item.work_id}, headers=await self._api_headers(),
+            )
+            vd = (resp.json().get("data") or {})
+            aid = int(vd.get("aid") or 0)
+            item.aid = aid
+        if not aid:
+            raise RuntimeError("缺少 aid，无法解析播放地址")
+
+        use_dash = bool(self.cookie) if prefer_dash is None else bool(prefer_dash)
+
+        if use_dash:
+            try:
+                urls = await self._playurl_dash(aid, cid, qn)
+                if urls:
+                    return urls
+            except Exception as e:
+                logger.warning(f"B站 DASH 解析失败，回退 html5 合流: {e}")
+
+        return await self._playurl_html5(aid, cid, qn)
+
+    async def _playurl_html5(self, aid: int, cid: int, qn: int = 127) -> list:
+        """html5 通道：免登录拿音视频已合流的单文件 mp4"""
+        signed = await self._wbi_sign({
+            "avid": str(aid), "cid": str(cid), "qn": str(qn),
+            "fnval": "1", "fnver": "0",
+            "platform": "html5", "high_quality": "1", "fourk": "1",
+        })
+        resp = await self.client.get(
+            "https://api.bilibili.com/x/player/wbi/playurl",
+            params=signed, headers=await self._api_headers(),
+        )
+        d = resp.json()
+        if d.get("code") != 0:
+            raise RuntimeError(f"playurl(html5) 失败: code={d.get('code')} {d.get('message', '')}")
+        durl = (d.get("data") or {}).get("durl") or []
+        urls = [x["url"] for x in durl if isinstance(x, dict) and x.get("url")]
+        if not urls:
+            raise RuntimeError("playurl(html5) 未返回可下载地址")
+        return urls
+
+    async def _playurl_dash(self, aid: int, cid: int, qn: int = 127) -> list:
+        """DASH 通道：视频/音频分离，返回 [video_url, audio_url]，需 ffmpeg 合并"""
+        signed = await self._wbi_sign({
+            "avid": str(aid), "cid": str(cid), "qn": str(qn),
+            "fnval": "4048", "fnver": "0", "fourk": "1", "platform": "pc",
+        })
+        resp = await self.client.get(
+            "https://api.bilibili.com/x/player/wbi/playurl",
+            params=signed, headers=await self._api_headers(),
+        )
+        d = resp.json()
+        if d.get("code") != 0:
+            raise RuntimeError(f"playurl(dash) 失败: code={d.get('code')} {d.get('message', '')}")
+        dash = (d.get("data") or {}).get("dash") or {}
+        videos = dash.get("video") or []
+        audios = dash.get("audio") or []
+        if not videos:
+            raise RuntimeError("DASH 未返回视频流")
+        # 优先 avc（兼容性最好），同 codec 下取最高分辨率，再比码率
+        v = max(videos, key=lambda x: (
+            int(x.get("id") or 0),
+            1 if "avc" in (x.get("codecs") or "") else 0,
+            int(x.get("bandwidth") or 0),
+        ))
+        a = max(audios, key=lambda x: int(x.get("bandwidth") or 0)) if audios else None
+        out = [v.get("baseUrl") or v.get("base_url")]
+        if a:
+            out.append(a.get("baseUrl") or a.get("base_url"))
+        return [u for u in out if u]
+
     async def find_room_id_by_user(self, user_id: str) -> str:
         """由 mid 解析直播间房间号。
 
@@ -397,3 +644,38 @@ class BilibiliPlatform(BasePlatform):
         except Exception as e:
             logger.warning(f"B站 mid→直播间解析失败 {user_id}: {e}")
             return ""
+
+
+# =============================================================================
+# 合集 / 多P 批量下载支持
+# =============================================================================
+# 背景：现有 get_download_urls() 只读 video view 的 data.cid —— 也就是**永远只取
+# 第 1 个分P**，对「真合集（ugc_season，跨多个 BV）」完全没有概念。用户粘贴一个
+# 合集/多P 链接时，行为是静默只下第一集。
+#
+# 下面这组方法补齐三种形态的枚举与直链解析：
+#   真合集  ugc_season.id -> seasons_archives_list 分页枚举全部 BV
+#   多P     video view 的 pages[] -> 每 P 一条
+#   单视频  一条
+#
+# 直链走 platform=html5 + fnval=1 通道：免登录即可拿到 720P~1080P 的
+# **音视频已合流的单文件 mp4**（直链不带水印，不需要 Referer）。
+# 配置了 bilibili_cookie（登录态）时改走 DASH 拿更高画质，需 ffmpeg 合并。
+# =============================================================================
+
+def _bili_extract_bvid(url: str) -> str:
+    """从 B站各种链接里取出 BV 号（含 /video/BVxxx、带杂参数、b23 短链已展开后的形态）"""
+    m = re.search(r"(BV[1-9A-HJ-NP-Za-km-z]{10})", url or "")
+    return m.group(1) if m else ""
+
+
+def _bili_extract_aid(url: str) -> int:
+    """从链接里取出 av 号（BV 之外的另一种写法）"""
+    m = re.search(r"/video/av(\d+)", url or "") or re.search(r"[?&]aid=(\d+)", url or "")
+    return int(m.group(1)) if m else 0
+
+
+def _bili_extract_page(url: str) -> int:
+    """链接里的 ?p=N（指定第几个分P），无则返回 0"""
+    m = re.search(r"[?&]p=(\d+)", url or "")
+    return int(m.group(1)) if m else 0
