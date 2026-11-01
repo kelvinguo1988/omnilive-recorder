@@ -11,7 +11,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from sqlalchemy import text
 from app.database import init_db, async_session
 from app.config import settings, get_data_dir
-from app.routers import rooms, recordings, system, files, works
+from app.routers import rooms, recordings, system, files, works, collections
 from app.services.archive import migrate_legacy_layout
 from app.services.monitor import monitor
 from app.services.works_monitor import works_monitor
@@ -149,6 +149,7 @@ app.include_router(recordings.router)
 app.include_router(system.router)
 app.include_router(files.router)
 app.include_router(works.router)
+app.include_router(collections.router)
 
 # 静态文件
 static_dir = os.path.join(os.path.dirname(__file__), "static")

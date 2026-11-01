@@ -617,9 +617,12 @@ class WorksMonitor:
         # 下载必然 403/失败。原实现只用缓存、从不重解析，于是作品**永久 failed**，
         # 连 /retry 端点也走同一份过期 URL、永远失败。
         # 现在：解析出可用地址 → 下载；若下载失败，清空缓存并重解析一次再试。
+        #
+        # 合集作品（collection_key 非空）走专用解析：需要按 bvid/分P 现算 cid 与
+        # 播放地址，且默认走 html5 合流通道（免登录 720P~1080P 单文件）。
         urls = self._cached_urls(work)
         if not urls:
-            urls = await self._resolve_urls(adapter, work)
+            urls = await self._resolve_urls(adapter, work, is_collection=bool(work.collection_key))
         if not urls:
             raise RuntimeError("未能获取下载地址（可能被风控或作品已删除）")
 
@@ -629,7 +632,15 @@ class WorksMonitor:
         date_str = work.publish_time.strftime("%Y%m%d") if work.publish_time else \
             utcnow().strftime("%Y%m%d")
         title = recorder._sanitize_filename(work.title or "")[:60] or "untitled"
-        base = f"{date_str}_{title}_{work.platform_work_id}"
+        # 合集/多P 作品带集号前缀（零填充），让归档目录里天然按集序排列，
+        # 例如 20261031_006_古典美术和二次元的区别（…）_BV1xx.mp4
+        if work.collection_key and work.episode_index:
+            ep = f"{int(work.episode_index):03d}_"
+        else:
+            ep = ""
+        # platform_work_id 里可能带 #pN 后缀，文件名中把 # 换成 _ 更稳妥
+        wid = (work.platform_work_id or "").replace("#", "_")
+        base = f"{date_str}_{ep}{title}_{wid}"
 
         # P1-4: 首次尝试失败（多为缓存直链过期 403）时，清空缓存并重解析一次再试。
         # 抖音/快手未覆写 get_download_urls，缓存过期后旧实现永久失败、/retry 也救不回来。
@@ -661,7 +672,9 @@ class WorksMonitor:
                     f"作品 {work.platform_work_id} 首次下载失败，清空过期直链缓存后重试: {last_error}"
                 )
                 await self._clear_cached_urls(work)
-                urls = await self._resolve_urls(adapter, work)
+                urls = await self._resolve_urls(
+                    adapter, work, is_collection=bool(work.collection_key)
+                )
                 if not urls:
                     raise RuntimeError(f"重新解析下载地址失败: {last_error}")
         else:
@@ -770,11 +783,34 @@ class WorksMonitor:
         return urls if isinstance(urls, list) else []
 
     @staticmethod
-    async def _resolve_urls(adapter, work: Work) -> list:
-        """二次解析下载地址（B站等需额外 API 调用；抖音/快手回退到列表缓存）"""
-        info = WorkInfo(work_id=work.platform_work_id, work_type=work.work_type,
-                        title=work.title or "")
+    async def _resolve_urls(adapter, work: Work, is_collection: bool = False) -> list:
+        """二次解析下载地址（B站等需额外 API 调用；抖音/快手回退到列表缓存）
+
+        is_collection=True 时走合集专用解析：按 platform_work_id 里解析出的
+        bvid/分P 现算 cid 并取播放地址（合集作品入库时**不缓存**直链，
+        因为带时效签名且每集不同）。
+        """
         try:
+            if is_collection and hasattr(adapter, "resolve_collection_item_urls"):
+                # platform_work_id 形如 BV1xx 或 BV1xx#p3
+                raw = work.platform_work_id or ""
+                bvid, _, ptxt = raw.partition("#p")
+                item = WorkInfo(
+                    work_id=bvid,
+                    work_type=work.work_type,
+                    title=work.title or "",
+                    part_index=int(ptxt) if ptxt.isdigit() else 1,
+                )
+                item.episode_index = int(work.episode_index or 1)
+                # 画质/通道按全局配置：collection_qn 默认 127（最高），
+                # collection_prefer_dash=False 时由适配器自动判断（有登录态才走 DASH）
+                return await adapter.resolve_collection_item_urls(
+                    item,
+                    prefer_dash=settings.collection_prefer_dash or None,
+                    qn=settings.collection_qn,
+                ) or []
+            info = WorkInfo(work_id=work.platform_work_id, work_type=work.work_type,
+                            title=work.title or "")
             return await adapter.get_download_urls(info) or []
         except Exception as e:
             logger.warning(f"二次解析下载地址失败 {work.platform_work_id}: {e}")

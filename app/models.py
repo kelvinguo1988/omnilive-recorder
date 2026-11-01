@@ -98,4 +98,17 @@ class Work(Base):
     downloaded_at = Column(DateTime, nullable=True, comment="下载完成时间")
     created_at = Column(DateTime, default=utcnow, comment="入库时间")
 
+    # ------------------------------------------------------------ 合集/多P 支持
+    # 「按合集下载」把合集内每一集也作为独立 Work 入库，从而直接复用现有下载队列
+    # （断点续传 / 去重 / 平台限速 / 磁盘水位）与归档同步，不需要另建一套下载体系。
+    # collection_key 为合集去重键：
+    #   真合集 -> "bili:season:{season_id}"
+    #   多P     -> "bili:multipart:{bvid}"
+    #   单视频  -> NULL（不属于任何合集，行为与普通作品一致）
+    collection_key = Column(String(200), nullable=True, index=True,
+                            comment="所属合集键(NULL=普通作品)")
+    collection_title = Column(String(500), nullable=True, comment="合集名称")
+    episode_index = Column(Integer, nullable=True,
+                           comment="集号(合集/多P内序号，从1起；NULL=非合集)")
+
     room = relationship("Room", back_populates="works")

@@ -45,6 +45,8 @@ class SettingsUpdate(BaseModel):
     works_check_count: Optional[int] = None
     works_auto_download: Optional[bool] = None
     works_backfill_limit: Optional[int] = None
+    collection_qn: Optional[int] = None
+    collection_prefer_dash: Optional[bool] = None
     daily_merge_max_gb: Optional[float] = None
     sync_enabled: Optional[bool] = None
     sync_root: Optional[str] = None
@@ -55,7 +57,7 @@ _VALID_FORMATS = {"ts", "flv", "mp4"}
 # 必须为正整数的字段；0 有语义的字段（=关闭/不限制）按非负校验
 _INT_FIELDS = ("segment_time", "monitor_interval", "check_timeout",
                "max_disk_usage", "works_poll_interval", "works_check_count",
-               "sync_interval")
+               "sync_interval", "collection_qn")
 _NONNEG_INT_FIELDS = ("works_backfill_limit", "stream_url_refresh_interval")
 _PROXY_RELATED = ("proxy_addr", "enable_proxy", "douyin_cookie", "bilibili_cookie", "kuaishou_cookie")
 

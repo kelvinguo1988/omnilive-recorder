@@ -53,6 +53,20 @@ async def init_db():
                 if col not in room_cols:
                     sync_conn.execute(text(f"ALTER TABLE rooms ADD COLUMN {col} {ddl}"))
 
+            # works 表补充合集/多P 支持列（幂等：已存在则跳过）
+            work_cols = insp_cols("works")
+            for col, ddl in [
+                ("collection_key", "VARCHAR(200)"),
+                ("collection_title", "VARCHAR(500)"),
+                ("episode_index", "INTEGER"),
+            ]:
+                if col not in work_cols:
+                    sync_conn.execute(text(f"ALTER TABLE works ADD COLUMN {col} {ddl}"))
+            # 合集查询索引：create_all 只对新库建索引，存量库需显式补（IF NOT EXISTS 保证幂等）
+            sync_conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_works_collection_key ON works (collection_key)"
+            ))
+
             # 统一主播模型迁移：旧 creators 表数据合并进 rooms 后删除
             tables = [r[0] for r in sync_conn.execute(
                 text("SELECT name FROM sqlite_master WHERE type='table'")

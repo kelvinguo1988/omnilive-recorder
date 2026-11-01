@@ -43,6 +43,16 @@ class AppConfig(BaseSettings):
     works_auto_download: bool = True
     works_backfill_limit: int = 0
 
+    # 合集下载（B站 合集 / 多P）
+    # collection_qn: 请求的画质码。127=最高（实际受账号权限约束），
+    #   120=4K / 116=1080P60 / 80=1080P / 64=720P。
+    #   匿名态走 html5 通道实测能拿 720P~1080P；配了 bilibili_cookie 才可能更高
+    #   （4K/HDR 还需要大会员，非大会员即使登录也只有 1080P）。
+    # collection_prefer_dash: 是否强制走 DASH（视频/音频分离，需 ffmpeg 合并）。
+    #   默认 False = 自动：有登录态 Cookie 才走 DASH，否则走免登录合流 mp4。
+    collection_qn: int = 127
+    collection_prefer_dash: bool = False
+
     # 存储设置
     output_dir: str = "/app/recordings"
     max_disk_usage: int = 90
@@ -106,6 +116,8 @@ def _get_mapping():
         "works_check_count": int,
         "works_auto_download": lambda x: x.lower() == "true",
         "works_backfill_limit": int,
+        "collection_qn": int,
+        "collection_prefer_dash": lambda x: x.lower() == "true",
         "output_dir": str,
         "max_disk_usage": int,
         "host": str,
@@ -203,6 +215,8 @@ def save_config(config: AppConfig = None) -> bool:
     section["works_check_count"] = str(config.works_check_count)
     section["works_auto_download"] = b(config.works_auto_download)
     section["works_backfill_limit"] = str(config.works_backfill_limit)
+    section["collection_qn"] = str(config.collection_qn)
+    section["collection_prefer_dash"] = b(config.collection_prefer_dash)
     section["output_dir"] = str(config.output_dir)
     section["max_disk_usage"] = str(config.max_disk_usage)
     section["host"] = str(config.host)
