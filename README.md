@@ -25,6 +25,13 @@
 - 每 10 分钟（可配）检测新作品，自动下载视频与图集（图集打包 zip），抖音无水印直链
 - 下载队列按平台串行 + 随机间隔限速防风控；检测与下载并行（回填期间下载不停摆）
 
+**合集下载（B站）**
+- 粘贴 B站「合集 / 多P / 单视频」链接，解析出完整清单后勾选下载（也支持 `b23.tv` 短链）
+- **免登录即可拿到 720P~1080P 合流 mp4**（`platform=html5` 通道，直链无水印、单文件、无需 ffmpeg）
+- 配置 B站 Cookie 后自动切 DASH 通道拿更高画质（ffmpeg 合并；4K/HDR 另需大会员）
+- 每集一条作品记录，复用同一套下载队列（断点续传、去重、限速、磁盘水位），归档命名带集号前缀便于排序
+- 重复导入同一合集是幂等的：已入库的集自动跳过，只补新增的集
+
 **统一主播管理**
 - 一个主播一条记录：直播间地址（直播录制）+ 主页地址（作品订阅）+ 各自开关
 - 直播间检测自动识别主播平台用户 ID（B站已实测双向互通），之后无需主页地址也能订阅作品
@@ -128,6 +135,39 @@ docker run -d --name omnilive-recorder -p 8000:8000 \
 - 作品文件落盘：`{output_dir}/{主播}/作品/{YYYYMMDD}_{标题}_{作品ID}.mp4`（图集为 `.zip`），与直播录像同属一个主播目录
 - 某作品失败（Cookie 过期/风控/已删除）不影响队列其它作品；修复 Cookie 后点「重新下载」即可
 
+### 第 4.5 步：合集下载（B站合集 / 多P）
+
+作品订阅是「按主播周期拉新作品」；**合集下载**是「按一个链接一次性把该合集全部集数拉下来」，
+两者最终都进同一个作品库与下载队列。
+
+1. 打开「合集下载」页，粘贴链接：
+   - 真合集（跨多个 BV）：`https://www.bilibili.com/video/BV1xxxxxxxxx`
+   - 多P（同一视频的多个分P）：同上，会自动识别为多P
+   - 短链：`https://b23.tv/xxxxx`
+2. 点「解析」→ 显示 `合集 / 多P / 单视频` 类型、总集数、总时长与逐集清单（**只解析不下载**）
+3. 勾选要下载的集（默认全选）→「下载选中」→ 进入后台队列，页面每 5 秒刷新进度
+4. 已导入的合集在下方列表可看进度、展开详情、对失败集一键重试
+
+**画质说明**（设置页「合集下载画质 / 合集下载通道」）：
+
+| 通道 | 画质 | 前置条件 |
+|---|---|---|
+| html5 合流 mp4（默认，免登录） | 实测 720P~1080P | 无 |
+| DASH（音视频分离，ffmpeg 合并） | 匿名 480P / 登录 1080P | 需配 B站 Cookie |
+| 4K / HDR | 仅大会员 | 需大会员 Cookie |
+
+实测（2026-11-01，本机匿名态）：合集第 6 集 1920×1080 h264+aac 5.6 MB；
+多P 第 3 集 1080×1906 h264+aac 123 MB / 384 秒 —— 均为无水印合流 mp4。
+
+归档命名：`{output_dir}/{合集名}/作品/{YYYYMMDD}_{集号}_{标题}_{BV号}.mp4`，
+集号零填充（`006_`）保证目录内自然按集序排列。
+
+**已知限制**
+- 单次导入上限 200 集（超过请分批，或解析后只勾选部分）
+- 直链带 `deadline`，约 2 小时有效；本工具不缓存直链，下载时现解析，因此不受影响
+- 番剧/影视（`/ep`、`/ss` 链接）不支持（需大会员鉴权）
+- 目前仅 B站 支持合集下载，抖音/快手的合集形态未实现
+
 ### 第 5 步：NAS 定期同步（QNAP 实测步骤）
 
 把已完成的直播录制与作品按主播归拢备份到 NAS：
@@ -201,6 +241,10 @@ ls /mnt/qnap-recordings && touch /mnt/qnap-recordings/.t && rm /mnt/qnap-recordi
 | GET / POST | `/api/system/settings/export` · `/import` | 设置导出 / 导入 |
 | POST | `/api/system/sync/run` | 立即执行一次 NAS 同步 |
 | GET | `/api/system/logs` · `/api/system/platforms` | 系统日志 / 支持平台 |
+| POST | `/api/collections/preview` | 解析合集链接 → 清单（不落库） |
+| POST | `/api/collections/import` | 合集导入入库（可选 `indices` 选集） |
+| GET | `/api/collections` | 已导入合集汇总（含下载进度） |
+| GET / POST | `/api/collections/{key}/items` · `/{key}/retry` | 合集明细 / 失败集重试 |
 
 ---
 
@@ -217,10 +261,11 @@ omnilive-recorder/
 ├── app/
 │   ├── main.py                    # FastAPI 入口（生命周期管理四个服务）
 │   ├── config.py / database.py / models.py
-│   ├── routers/                   # rooms(主播) / works / recordings / files / system
+│   ├── routers/                   # rooms(主播) / works / collections / recordings / files / system
 │   ├── services/
 │   │   ├── monitor.py             # 直播监控 + 当日合并
 │   │   ├── works_monitor.py       # 作品订阅（检查/下载并行双循环）
+│   │   ├── collection_service.py  # 合集/多P 解析入库（复用下载队列）
 │   │   ├── archive.py             # 归档目录布局单一来源 + 存量布局自动迁移
 │   │   ├── sync_service.py        # NAS 同步
 │   │   ├── platform_manager.py    # 平台适配器统一缓存

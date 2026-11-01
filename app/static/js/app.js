@@ -92,6 +92,7 @@ function switchPage(page) {
     else if (page === 'recordings') loadRecordings();
     else if (page === 'works') loadWorksPage();
     else if (page === 'files') loadFiles();
+    else if (page === 'collections') loadCollections();
     else if (page === 'settings') loadSettings();
 }
 
@@ -953,6 +954,9 @@ async function loadSettings() {
         setCheck('set_enable_proxy', s.enable_proxy);
         setField('set_works_poll_interval', s.works_poll_interval);
         setField('set_works_backfill_limit', s.works_backfill_limit);
+        // 合集下载：画质码（select 用字符串匹配）与通道（布尔转 'true'/'false'）
+        setField('set_collection_qn', String(s.collection_qn ?? 127));
+        setField('set_collection_prefer_dash', s.collection_prefer_dash ? 'true' : 'false');
         setCheck('set_works_auto_download', s.works_auto_download);
         setCheck('set_sync_enabled', s.sync_enabled);
         setField('set_sync_root', s.sync_root);
@@ -1062,6 +1066,11 @@ async function saveSettings(e) {
                      "max_disk_usage", "works_check_count", "sync_interval"]) {
         if (!(payload[k] > 0)) delete payload[k];
     }
+    // 合集下载：画质码是正整数（留空/0 不提交），通道是布尔
+    const collQn = parseInt(getField('set_collection_qn'), 10);
+    if (collQn > 0) payload.collection_qn = collQn;
+    payload.collection_prefer_dash = getField('set_collection_prefer_dash') === 'true';
+
     // 检测间隔留空则不提交（后端只更新传入字段），避免 0 被"必须为正数"校验拒绝
     const pollInterval = parseInt(getField('set_works_poll_interval'), 10);
     if (pollInterval > 0) payload.works_poll_interval = pollInterval;
@@ -1284,5 +1293,208 @@ document.addEventListener('keydown', (e) => {
         hideAddRoomModal();
         hideEditRoomModal();
         hidePlayer();
+    }
+});
+
+// ============================================================ 合集下载
+// 与「作品订阅」互补：作品订阅按主播周期拉新作品；这里按**一个合集链接**一次性
+// 把该合集全部集数导入 works 表，复用同一套下载队列（断点续传/去重/限速/水位）。
+// 流程：粘贴链接 -> 解析预览（不落库）-> 勾选 -> 导入 -> 后台队列下载 -> 进度轮询。
+
+let collectionPreview = null;     // 最近一次解析结果
+let collectionTimer = null;       // 已导入合集的刷新定时器
+
+async function parseCollection() {
+    const input = document.getElementById('collectionUrl');
+    const btn = document.getElementById('parseCollectionBtn');
+    const url = (input?.value || '').trim();
+    if (!url) { showToast('请先粘贴合集链接', 'warning'); input?.focus(); return; }
+
+    const oldLabel = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = '解析中...'; }
+    try {
+        const data = await API.post('/api/collections/preview', { url });
+        collectionPreview = data;
+        renderCollectionPreview(data);
+        showToast(`解析成功：${data.kind_name} 共 ${data.total} 集`, 'success');
+    } catch (e) {
+        collectionPreview = null;
+        const card = document.getElementById('collectionPreviewCard');
+        if (card) card.style.display = 'none';
+        showToast(errorDetail(e, '解析失败'), 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = oldLabel || '解析'; }
+    }
+}
+
+function renderCollectionPreview(data) {
+    const card = document.getElementById('collectionPreviewCard');
+    const title = document.getElementById('collectionPreviewTitle');
+    const meta = document.getElementById('collectionMeta');
+    const tbody = document.getElementById('collectionPreviewBody');
+    if (!card || !tbody) return;
+
+    card.style.display = '';
+    if (title) title.textContent = `${data.kind_name}：${data.title || '(无标题)'}`;
+    if (meta) {
+        const totalSec = data.items.reduce((s, it) => s + (Number(it.duration) || 0), 0);
+        meta.textContent = `共 ${data.total} 集 · 总时长 ${formatDuration(totalSec) || '-'}`;
+    }
+    tbody.innerHTML = data.items.map(it => `
+        <tr>
+            <td class="col-check">
+                <input type="checkbox" class="collection-check" data-idx="${it.episode_index}" checked>
+            </td>
+            <td>${escapeHtml(String(it.episode_index))}</td>
+            <td title="${escapeHtml(it.title || '')}">${escapeHtml((it.title || '').slice(0, 60) || '-')}</td>
+            <td>${formatDuration(it.duration)}</td>
+        </tr>
+    `).join('');
+    const all = document.getElementById('collectionCheckAll');
+    if (all) all.checked = true;
+    updateCollectionImportBtn();
+}
+
+function collectionSelectAll(checked) {
+    document.querySelectorAll('.collection-check').forEach(c => { c.checked = !!checked; });
+    const all = document.getElementById('collectionCheckAll');
+    if (all) all.checked = !!checked;
+    updateCollectionImportBtn();
+}
+
+function updateCollectionImportBtn() {
+    const btn = document.getElementById('collectionImportBtn');
+    if (!btn) return;
+    const n = document.querySelectorAll('.collection-check:checked').length;
+    btn.disabled = n < 1;
+    btn.textContent = n >= 1 ? `下载选中（${n}）` : '下载选中';
+}
+
+async function importCollection() {
+    if (!collectionPreview) { showToast('请先解析链接', 'warning'); return; }
+    const picked = [...document.querySelectorAll('.collection-check:checked')]
+        .map(c => parseInt(c.dataset.idx, 10))
+        .filter(n => Number.isInteger(n));
+    if (!picked.length) { showToast('请至少选择 1 集', 'warning'); return; }
+
+    const btn = document.getElementById('collectionImportBtn');
+    const oldLabel = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = '导入中...'; }
+    try {
+        const res = await API.post('/api/collections/import', {
+            url: (document.getElementById('collectionUrl')?.value || '').trim(),
+            indices: picked,
+        });
+        showToast(res.message || '已加入下载队列', 'success');
+        await loadCollections();
+        startCollectionPolling();
+    } catch (e) {
+        showToast(errorDetail(e, '导入失败'), 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = oldLabel || '下载选中'; }
+        updateCollectionImportBtn();
+    }
+}
+
+async function loadCollections() {
+    const tbody = document.getElementById('collectionsBody');
+    if (!tbody) return;
+    try {
+        const list = asList(await API.get('/api/collections'), '合集列表');
+        // 还有下载中/待下载的集 -> 保持轮询；全部结束则停
+        collectionBusy = list.some(c => (c.pending || 0) > 0 || (c.downloading || 0) > 0);
+        if (!list.length) {
+            tbody.innerHTML = '<tr><td colspan="8" class="empty-state">还没有导入过合集，粘贴链接解析后下载</td></tr>';
+            return;
+        }
+        tbody.innerHTML = list.map(c => {
+            const done = c.completed || 0;
+            const total = c.total || 0;
+            const pct = total ? Math.round(done * 100 / total) : 0;
+            return `
+            <tr>
+                <td title="${escapeHtml(c.collection_title || '')}">${escapeHtml((c.collection_title || c.collection_key || '-').slice(0, 40))}</td>
+                <td>${total}</td>
+                <td>${done}${pct ? ` <span class="form-hint">(${pct}%)</span>` : ''}</td>
+                <td>${c.downloading || 0}</td>
+                <td>${c.pending || 0}</td>
+                <td>${c.failed ? `<span class="status-badge status-failed">${c.failed}</span>` : 0}</td>
+                <td>${formatSize(c.size_mb)}</td>
+                <td>
+                    <div class="action-group">
+                        <button class="btn btn-sm btn-secondary" onclick="toggleCollectionItems('${escapeHtml(c.collection_key)}')">详情</button>
+                        ${c.failed ? `<button class="btn btn-sm btn-secondary" onclick="retryCollection('${escapeHtml(c.collection_key)}')">重试失败</button>` : ''}
+                    </div>
+                </td>
+            </tr>
+            <tr class="collection-items-row" id="ci-${escapeHtml(c.collection_key)}" style="display:none">
+                <td colspan="8"><div class="form-hint">加载中...</div></td>
+            </tr>`;
+        }).join('');
+    } catch (e) {
+        const msg = errorDetail(e, '加载合集列表失败');
+        tbody.innerHTML = tableErrorRow(8, msg);
+        showToast(msg, 'error');
+    }
+}
+
+async function toggleCollectionItems(key) {
+    const row = document.getElementById('ci-' + key);
+    if (!row) return;
+    const showing = row.style.display !== 'none';
+    if (showing) { row.style.display = 'none'; return; }
+    row.style.display = '';
+    try {
+        const items = asList(await API.get(`/api/collections/${encodeURIComponent(key)}/items`), '合集明细');
+        const STATUS = { pending: ['status-offline', '待下载'], downloading: ['status-recording', '下载中'],
+                         completed: ['status-completed', '已完成'], failed: ['status-failed', '失败'] };
+        row.cells[0].innerHTML = items.map(it => {
+            const [cls, text] = STATUS[it.status] || ['status-offline', it.status];
+            return `<div style="display:flex;gap:8px;align-items:center;padding:2px 0">
+                <span style="min-width:44px">#${escapeHtml(String(it.episode_index))}</span>
+                <span class="status-badge ${cls}">${escapeHtml(text)}</span>
+                <span title="${escapeHtml(it.title || '')}">${escapeHtml((it.title || '').slice(0, 46) || '-')}</span>
+                <span class="form-hint">${formatSize(it.file_size_mb)}</span>
+                ${it.error_message ? `<span class="form-hint" title="${escapeHtml(it.error_message)}">${escapeHtml(it.error_message.slice(0, 40))}</span>` : ''}
+            </div>`;
+        }).join('');
+    } catch (e) {
+        row.cells[0].innerHTML = `<div class="form-hint">${escapeHtml(errorDetail(e, '加载失败'))}</div>`;
+    }
+}
+
+async function retryCollection(key) {
+    try {
+        const res = await API.post(`/api/collections/${encodeURIComponent(key)}/retry`, {});
+        showToast(res.message || '已重新入队', 'success');
+        await loadCollections();
+        startCollectionPolling();
+    } catch (e) {
+        showToast(errorDetail(e, '重试失败'), 'error');
+    }
+}
+
+// 有在下载的集时每 5s 刷新一次；全部结束后自动停止，避免无谓轮询。
+// 是否继续轮询由后端返回的 pending/downloading 计数决定（不靠猜 DOM 文本）。
+let collectionBusy = false;
+
+function startCollectionPolling() {
+    collectionBusy = true;
+    if (collectionTimer) return;
+    collectionTimer = setInterval(async () => {
+        if (currentPage !== 'collections') { stopCollectionPolling(); return; }
+        await loadCollections();
+        if (!collectionBusy) stopCollectionPolling();
+    }, 5000);
+}
+
+function stopCollectionPolling() {
+    if (collectionTimer) { clearInterval(collectionTimer); collectionTimer = null; }
+}
+
+// 预览勾选框变化时更新按钮
+document.addEventListener('change', (e) => {
+    if (e.target && e.target.classList && e.target.classList.contains('collection-check')) {
+        updateCollectionImportBtn();
     }
 });

@@ -32,6 +32,10 @@
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M2 12h20M12 4v16"/></svg>
                 <span>作品订阅</span>
             </a>
+            <a class="nav-item" data-page="collections" onclick="switchPage('collections')">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><path d="M9 7h7M9 11h7"/></svg>
+                <span>合集下载</span>
+            </a>
             <a class="nav-item" data-page="files" onclick="switchPage('files')">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
                 <span>文件管理</span>
@@ -254,6 +258,79 @@
         </div>
 
         <!-- 文件管理 -->
+        <div id="page-collections" class="page">
+            <header class="page-header">
+                <h1>合集下载</h1>
+                <div class="page-header-actions">
+                    <span class="form-hint">粘贴 B站「合集 / 多P / 单视频」链接，解析后勾选要下载的集</span>
+                </div>
+            </header>
+
+            <div class="card">
+                <div class="card-header"><h2>解析链接</h2></div>
+                <div class="form-row">
+                    <input id="collectionUrl" class="input" type="text" spellcheck="false"
+                           placeholder="https://www.bilibili.com/video/BV1xx  （也支持 b23.tv 短链）"
+                           onkeydown="if(event.key==='Enter'){parseCollection()}">
+                    <button id="parseCollectionBtn" class="btn btn-primary" onclick="parseCollection()">解析</button>
+                </div>
+                <div class="form-hint" style="margin-top:8px">
+                    免登录即可解析与下载 720P~1080P 合流 mp4；在「系统设置 → B站 Cookie」填登录态后可自动切 DASH 拿更高画质。
+                </div>
+            </div>
+
+            <div id="collectionPreviewCard" class="card" style="display:none">
+                <div class="card-header">
+                    <h2 id="collectionPreviewTitle">解析结果</h2>
+                    <div class="file-toolbar">
+                        <span class="form-hint" id="collectionMeta"></span>
+                        <button class="btn btn-sm btn-secondary" onclick="collectionSelectAll(true)">全选</button>
+                        <button class="btn btn-sm btn-secondary" onclick="collectionSelectAll(false)">全不选</button>
+                        <button id="collectionImportBtn" class="btn btn-sm btn-primary" onclick="importCollection()">下载选中</button>
+                    </div>
+                </div>
+                <div class="table-scroll">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th class="col-check"><input type="checkbox" id="collectionCheckAll" onchange="collectionSelectAll(this.checked)"></th>
+                                <th>集号</th>
+                                <th>标题</th>
+                                <th>时长</th>
+                            </tr>
+                        </thead>
+                        <tbody id="collectionPreviewBody"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <h2>已导入合集</h2>
+                    <div class="file-toolbar">
+                        <button class="btn btn-sm btn-secondary" onclick="loadCollections()">刷新</button>
+                    </div>
+                </div>
+                <div class="table-scroll">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>合集</th>
+                                <th>总集数</th>
+                                <th>已完成</th>
+                                <th>下载中</th>
+                                <th>待下载</th>
+                                <th>失败</th>
+                                <th>占用</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="collectionsBody"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
         <div id="page-files" class="page">
             <header class="page-header">
                 <h1>文件管理</h1>
@@ -351,6 +428,25 @@
                             <label>回填条数上限</label>
                             <input id="set_works_backfill_limit" class="input" type="number" min="0" placeholder="0" />
                             <div class="form-hint">首次添加创作者回填的历史作品条数上限，0 = 不限制（回填全部）</div>
+                        </div>
+                        <div class="form-group">
+                            <label>合集下载画质</label>
+                            <select id="set_collection_qn" class="select">
+                                <option value="127">最高（默认，受账号权限约束）</option>
+                                <option value="120">4K（需大会员）</option>
+                                <option value="116">1080P60</option>
+                                <option value="80">1080P</option>
+                                <option value="64">720P</option>
+                            </select>
+                            <div class="form-hint">仅影响「合集下载」页；匿名态实际上限约 1080P，4K 需大会员 Cookie</div>
+                        </div>
+                        <div class="form-group">
+                            <label>合集下载通道</label>
+                            <select id="set_collection_prefer_dash" class="select">
+                                <option value="false">自动（有 B站 Cookie 走 DASH，否则免登录合流 mp4）</option>
+                                <option value="true">强制 DASH（音视频分离，ffmpeg 合并）</option>
+                            </select>
+                            <div class="form-hint">免登录走 html5 合流 mp4 即可获得 720P~1080P 单文件，无需 ffmpeg</div>
                         </div>
                     </div>
                 </div>
