@@ -8,7 +8,7 @@ import os
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
@@ -203,13 +203,24 @@ async def import_settings(data: dict):
     """从 JSON 批量导入系统设置（用于备份 / 迁移）
 
     仅接受已知设置字段；布尔值为 false 时也保留（不会被过滤）。
+    值先过 SettingsUpdate 模型做类型校验——畸形备份（如数字型 output_dir）
+    返回 400 而不是在后续 .strip()/`in` 比较时抛 500。
     备份导出已脱敏，其中的掩码字段会被跳过，迁移后需在设置页重填。
     """
     known = set(SettingsUpdate.model_fields.keys())
     updates = {k: v for k, v in data.items() if k in known and v is not None}
     if not updates:
         raise HTTPException(status_code=400, detail="未提供任何有效的设置项")
-    return await _apply_settings(updates)
+    try:
+        validated = SettingsUpdate(**updates).model_dump(exclude_unset=True)
+    except ValidationError as e:
+        first = e.errors()[0] if e.errors() else {}
+        raise HTTPException(
+            status_code=400,
+            detail=f"设置项格式错误: {first.get('msg', str(e))} "
+                   f"（字段: {first.get('loc', '?')}）",
+        )
+    return await _apply_settings(validated)
 
 
 async def _apply_settings(updates: dict):

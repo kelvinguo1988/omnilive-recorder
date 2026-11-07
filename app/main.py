@@ -1,4 +1,5 @@
 """Live Recorder - 多平台直播录制平台"""
+import hmac
 import logging
 import os
 import shutil
@@ -41,7 +42,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # 仅对 /api/* 鉴权；静态首页与 / 放行
         if API_TOKEN and path.startswith("/api/"):
             auth = request.headers.get("Authorization", "")
-            if auth != f"Bearer {API_TOKEN}":
+            # 常量时间比较，避免逐字节比较的时序侧信道泄露 token
+            if not hmac.compare_digest(auth, f"Bearer {API_TOKEN}"):
                 return JSONResponse(status_code=401, content={"detail": "未授权：缺少或错误的 API Token"})
         return await call_next(request)
 
@@ -122,7 +124,20 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS
+# P1-3: 可选 API 鉴权中间件（仅当配置了 LIVE_RECORDER_API_TOKEN 时生效）。
+# 必须在 CORS 之前注册（add_middleware 后注册者在外层）：若 Auth 在外层，
+# 401 响应不经过 CORSMiddleware、不带 Access-Control-Allow-Origin 头，
+# 跨域客户端只能看到不透明的 CORS 失败而非可读的 401。
+if API_TOKEN:
+    app.add_middleware(AuthMiddleware)
+    logger.info("已启用 API Token 鉴权（LIVE_RECORDER_API_TOKEN）")
+else:
+    logger.warning(
+        "未设置 LIVE_RECORDER_API_TOKEN，API 接口无鉴权。"
+        "请仅在内网部署，或在反向代理前加鉴权，或设置该环境变量启用 Bearer Token 鉴权。"
+    )
+
+# CORS（最外层，401 等所有响应都能带上跨域头）
 # P1-3: 关闭 allow_credentials（与 allow_origins="*" 互斥，原组合违反浏览器规范）。
 # 若需带凭据跨域，请把 allow_origins 改为具体的前端域名白名单。
 app.add_middleware(
@@ -132,16 +147,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# P1-3: 可选 API 鉴权中间件（仅当配置了 LIVE_RECORDER_API_TOKEN 时生效）
-if API_TOKEN:
-    app.add_middleware(AuthMiddleware)
-    logger.info("已启用 API Token 鉴权（LIVE_RECORDER_API_TOKEN）")
-else:
-    logger.warning(
-        "未设置 LIVE_RECORDER_API_TOKEN，API 接口无鉴权。"
-        "请仅在内网部署，或在反向代理前加鉴权，或设置该环境变量启用 Bearer Token 鉴权。"
-    )
 
 # 注册路由
 app.include_router(rooms.router)

@@ -133,11 +133,22 @@ def _get_mapping():
 
 
 def _apply_ini(config: AppConfig, path: str):
-    """将 INI 文件 DEFAULT 节的值应用到 config 实例（不存在则跳过）"""
+    """将 INI 文件 DEFAULT 节的值应用到 config 实例（不存在则跳过）
+
+    解析失败（文件被截断/手改坏）时不抛错：跳过该文件并用默认值继续，
+    避免一次损坏的 runtime_config.ini 让应用在 import 时就起不来。
+    """
     if not path or not os.path.exists(path):
         return
     parser = configparser.ConfigParser(interpolation=None)
-    parser.read(path, encoding="utf-8")
+    try:
+        parser.read(path, encoding="utf-8")
+    except configparser.Error as e:
+        import logging
+        logging.getLogger(__name__).warning(
+            f"配置文件解析失败，已跳过并使用默认值: {path} ({e})"
+        )
+        return
     # DEFAULT 是 configparser 的保留节，parser["DEFAULT"] 始终可用
     section = parser["DEFAULT"]
     mapping = _get_mapping()
@@ -232,8 +243,21 @@ def save_config(config: AppConfig = None) -> bool:
     parent = os.path.dirname(config_path)
     if parent:
         os.makedirs(parent, exist_ok=True)
-    with open(config_path, "w", encoding="utf-8") as f:
-        parser.write(f)
+    # 原子写：先写临时文件再 os.replace。直接 open("w") 截断原文件后若进程崩溃
+    # 或两个设置请求并发写入，会留下截断的 INI，下次启动 parser.read() 抛
+    # ParsingError 使应用无法启动。临时文件名带线程标识避免并发写互踩。
+    import threading
+    tmp_path = f"{config_path}.{os.getpid()}.{threading.get_ident()}.tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            parser.write(f)
+        os.replace(tmp_path, config_path)
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
     # 确保输出目录存在
     Path(config.output_dir).mkdir(parents=True, exist_ok=True)

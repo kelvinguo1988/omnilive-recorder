@@ -77,14 +77,34 @@ async def init_db():
                          "enabled, backfill_done, remark FROM creators")
                 ).fetchall()
                 for cid, platform, puid, nickname, home_url, enabled, backfilled, remark in creator_rows:
-                    # 同平台同ID的主播已存在则并入，否则新建主播行（无直播间地址）
+                    # 查重匹配（逐级放宽）：
+                    # a) platform_user_id —— 存量 rooms 行该列是本次迁移才加的、全为 NULL，
+                    #    `!= ''` 对 NULL 恒不成立，不能作为唯一条件（否则每个创作者都插成
+                    #    新行，与已有直播间的同一主播重复）；
+                    # b) home_url 相同；
+                    # c) 同平台且主播名相同且该行未开作品订阅（老库无法离线验证
+                    #    直播间与主页是否同一人，同名启发式仅在未占用作品订阅时合并）。
                     existing = sync_conn.execute(
-                        text("SELECT id FROM rooms WHERE platform=:p AND platform_user_id=:u "
-                             "AND platform_user_id != ''"),
-                        {"p": platform, "u": puid},
+                        text("SELECT id FROM rooms WHERE platform=:p AND "
+                             "((platform_user_id IS NOT NULL AND platform_user_id != '' AND "
+                             "  platform_user_id=:u) OR home_url=:h OR "
+                             " (works_enabled=0 AND streamer_name IS NOT NULL AND streamer_name=:n))"),
+                        {"p": platform, "u": puid, "h": home_url or "", "n": nickname or ""},
                     ).first()
                     if existing:
                         new_id = existing[0]
+                        # 合并时必须把作品订阅字段带到已有主播行，否则 works_enabled
+                        # 保持 0，works_monitor 过滤 works_enabled 时会静默跳过
+                        sync_conn.execute(
+                            text("UPDATE rooms SET "
+                                 "home_url=COALESCE(NULLIF(home_url,''), :h), "
+                                 "platform_user_id=COALESCE(NULLIF(platform_user_id,''), :u), "
+                                 "works_enabled=1, backfill_done=:bd, "
+                                 "streamer_name=COALESCE(NULLIF(streamer_name,''), :n) "
+                                 "WHERE id=:id"),
+                            {"h": home_url, "u": puid, "bd": bool(backfilled),
+                             "n": nickname, "id": new_id},
+                        )
                     else:
                         ins = sync_conn.execute(
                             text("INSERT INTO rooms (url, platform, quality, enabled, is_live, "
