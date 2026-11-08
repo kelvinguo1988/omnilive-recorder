@@ -1,4 +1,7 @@
 """作品订阅API - 作品记录管理（主播的添加/编辑/订阅开关在主播管理 /api/rooms）"""
+import logging
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,16 +15,19 @@ from app.services.works_monitor import works_monitor
 
 router = APIRouter(prefix="/api/works", tags=["works"])
 
+logger = logging.getLogger(__name__)
+
 
 @router.get("")
-async def list_works(room_id: int = None, status: str = None, limit: int = 200,
-                     db: AsyncSession = Depends(get_db)):
+async def list_works(room_id: Optional[int] = None, status: Optional[str] = None,
+                     limit: int = 200, db: AsyncSession = Depends(get_db)):
     """作品列表（可按主播/状态过滤）"""
     query = (
         select(Work, Room)
         .join(Room, Work.creator_id == Room.id)
         .order_by(Work.publish_time.desc().nullslast(), Work.id.desc())
-        .limit(min(limit, 500))
+        # 下限 1：SQLite 把 LIMIT -1 解释为"无上限"，负数会整表返回
+        .limit(max(1, min(limit, 500)))
     )
     if room_id is not None:
         query = query.where(Work.creator_id == room_id)
@@ -95,13 +101,19 @@ async def delete_work(work_id: int, db: AsyncSession = Depends(get_db)):
     work = result.scalar_one_or_none()
     if not work:
         raise HTTPException(status_code=404, detail="作品不存在")
+    # 与 retry 一致的在途保护：下载中删除会让队列稍后把新文件写到一个已无
+    # DB 记录的路径上，下次启动 import_existing_files 又把它认领回来——
+    # "已删除"的作品静默复活
+    if work.status == "downloading":
+        raise HTTPException(status_code=400, detail="正在下载中，请等待下载结束后再删除")
 
     if work.file_path:
         from app.services.file_manager import file_manager
         try:
             file_manager.delete_file(work.file_path)
-        except Exception:
-            pass
+        except Exception as e:  # noqa: BLE001
+            # 文件删除失败不阻断记录删除，但必须留痕——否则磁盘孤儿无从排查
+            logger.warning(f"删除作品文件失败 {work.file_path}: {e}")
 
     from sqlalchemy import delete as sa_delete
     await db.execute(sa_delete(Work).where(Work.id == work_id))

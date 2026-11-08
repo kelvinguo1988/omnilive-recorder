@@ -14,10 +14,12 @@
     bili:single:{bvid}          单视频（等价于普通作品）
 同一合集重复导入是幂等的：已入库的集会被跳过，只补新增的集。
 """
+import asyncio
 import logging
 from dataclasses import dataclass, field
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app.database import async_session
 from app.services.platform import PlatformFactory
@@ -68,8 +70,16 @@ class CollectionService:
     """合集解析与导入"""
 
     # 单次导入的集数上限：防止误贴一个超大合集把磁盘塞满
-    # （B站合集上限实测 74+ 集，这里给一个更宽松但有限的护栏）
+    # （B站合集上限实测 74+ 集，这里给一个更宽松但有限的护栏）。
+    # 注意上限作用于"实际选中的集数"而非合集总集数——预览大合集再勾选
+    # 部分集导入是合法用法，对 total 一刀切会让提示语里的建议自相矛盾。
     MAX_ITEMS = 200
+
+    def __init__(self):
+        # 导入串行化：preview→入库是跨会话的 check-then-act，并发导入（双击、
+        # 两个重叠请求）会双双通过存在检查后在 commit 时撞唯一约束，
+        # 整批回滚 500，破坏"已入库的集会被跳过"的幂等契约
+        self._import_lock = asyncio.Lock()
 
     async def _adapter_for(self, platform_name: str):
         adapter = await platform_manager.get(platform_name)
@@ -99,11 +109,8 @@ class CollectionService:
             )
 
         info = await parse(url)
-        if info.total > self.MAX_ITEMS:
-            raise RuntimeError(
-                f"该合集共 {info.total} 集，超过单次导入上限 {self.MAX_ITEMS} 集。"
-                f"请解析后在清单里只勾选部分集导入，或分批导入"
-            )
+        # 上限不在预览阶段卡：预览的目的就是"先看清单再决定下载哪些"，
+        # 大合集预览直接报错会让部分导入的合法路径走不通
         return CollectionPreview(
             platform=platform_name, kind=info.kind, title=info.title,
             collection_key=info.collection_key, total=info.total, items=info.items,
@@ -117,6 +124,11 @@ class CollectionService:
                         保证 works.creator_id 外键与归档目录逻辑不变。
         :param indices: 只导入这些集号（1 起）；为空表示全部
         """
+        async with self._import_lock:
+            return await self._import_to_works_inner(url, room_id, indices)
+
+    async def _import_to_works_inner(self, url: str, room_id: int = None,
+                                     indices: list = None) -> dict:
         preview = await self.preview(url)
         items = preview.items
         if indices:
@@ -124,6 +136,15 @@ class CollectionService:
             items = [it for it in items if it.episode_index in wanted]
             if not items:
                 raise RuntimeError(f"所选集号 {sorted(wanted)} 在清单中不存在")
+        # 指定主播时先做归属校验（只读），再卡集数上限——否则平台选错了
+        # 却收到"集数超限"这种误导性报错
+        if room_id:
+            await self._validate_room(room_id, preview.platform)
+        if len(items) > self.MAX_ITEMS:
+            raise RuntimeError(
+                f"本次将导入 {len(items)} 集，超过单次导入上限 {self.MAX_ITEMS} 集。"
+                f"请在清单里只勾选部分集导入，或分批导入"
+            )
 
         room_id = await self._ensure_room(room_id, preview)
 
@@ -144,6 +165,31 @@ class CollectionService:
             "message": f"已导入 {added} 集（已存在跳过 {skipped} 集），正在加入下载队列",
         }
 
+    @staticmethod
+    def _raise_if_room_invalid(room, platform: str):
+        """归属主播合法性：下载队列按 room.platform 选适配器、按 works_enabled
+        过滤——跨平台导入会用错适配器永久失败，导入到未订阅主播的新作品会被
+        队列直接标 failed。"""
+        if room.platform != platform:
+            raise RuntimeError(
+                f"指定主播平台({room.platform})与合集平台({platform})不一致，"
+                f"请选择同平台主播，或留空自动创建合集专属主播"
+            )
+        if not room.works_enabled:
+            raise RuntimeError(
+                "该主播未开启作品订阅。请先在主播管理开启后再导入"
+                "（直接代开会顺带触发其主页作品全量回填，故不在导入时代开）"
+            )
+
+    async def _validate_room(self, room_id: int, platform: str):
+        """只读校验指定主播（不产生创建副作用，供集数上限检查前调用）"""
+        from app.models import Room
+        async with async_session() as session:
+            room = await session.get(Room, room_id)
+        if room is None:
+            raise RuntimeError(f"指定主播不存在: {room_id}")
+        self._raise_if_room_invalid(room, platform)
+
     async def _ensure_room(self, room_id: int, preview: CollectionPreview) -> int:
         """确定归属主播；未指定时复用/创建一个合集专属主播
 
@@ -159,6 +205,7 @@ class CollectionService:
                 room = await session.get(Room, room_id)
                 if room is None:
                     raise RuntimeError(f"指定主播不存在: {room_id}")
+                self._raise_if_room_invalid(room, preview.platform)
                 return room.id
 
             # 以合集标题作为主播名找已存在的（同平台同名视为同一个）
@@ -213,7 +260,7 @@ class CollectionService:
                 if exists.first():
                     skipped += 1
                     continue
-                session.add(Work(
+                work = Work(
                     creator_id=room_id,
                     platform_work_id=wid,
                     work_type="video",
@@ -228,8 +275,17 @@ class CollectionService:
                     collection_key=preview.collection_key,
                     collection_title=(preview.title or "")[:500],
                     episode_index=it.episode_index,
-                ))
-                added += 1
+                )
+                # 存在检查到提交之间存在并发窗口（启动文件认领/订阅回填可能同时
+                # 插入同一作品）：用 SAVEPOINT 逐条兜底，撞唯一约束只丢这一条、
+                # 计入 skipped，而不是整批回滚 500
+                try:
+                    async with session.begin_nested():
+                        session.add(work)
+                    added += 1
+                except IntegrityError:
+                    skipped += 1
+                    continue
             if added:
                 await session.commit()
         return added, skipped

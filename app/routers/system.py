@@ -202,11 +202,16 @@ async def update_settings(data: SettingsUpdate):
 async def import_settings(data: dict):
     """从 JSON 批量导入系统设置（用于备份 / 迁移）
 
+    兼容 /settings/export 的包装结构 {"version":..., "type":..., "settings": {...}}——
+    直接把导出文件 POST 回来也能往返（否则顶层全是 version/type 等包装键，
+    过滤后恒为空、导入自己的备份必 400）。
     仅接受已知设置字段；布尔值为 false 时也保留（不会被过滤）。
     值先过 SettingsUpdate 模型做类型校验——畸形备份（如数字型 output_dir）
     返回 400 而不是在后续 .strip()/`in` 比较时抛 500。
     备份导出已脱敏，其中的掩码字段会被跳过，迁移后需在设置页重填。
     """
+    if isinstance(data.get("settings"), dict):
+        data = data["settings"]
     known = set(SettingsUpdate.model_fields.keys())
     updates = {k: v for k, v in data.items() if k in known and v is not None}
     if not updates:
@@ -258,6 +263,11 @@ async def _apply_settings(updates: dict):
                 detail="文件名模板替换后为空，请至少包含 {streamer}/{room_id}/{time} 等占位符之一",
             )
 
+    # 轮询类间隔的语义下限：值过小等于每秒扫全部房间/创作者，会把自己打成
+    # 平台风控目标（前端 min 属性只是提示，按钮非 form 提交不触发原生校验，
+    # import 接口更是完全绕过 UI，必须在后端兜住）
+    _INT_MINIMUMS = {"monitor_interval": 10, "works_poll_interval": 30}
+
     # 校验整数型字段
     for field in _INT_FIELDS:
         if field in updates:
@@ -267,6 +277,11 @@ async def _apply_settings(updates: dict):
                 raise HTTPException(status_code=400, detail=f"{field} 必须为整数")
             if val <= 0:
                 raise HTTPException(status_code=400, detail=f"{field} 必须为正数")
+            floor = _INT_MINIMUMS.get(field)
+            if floor and val < floor:
+                raise HTTPException(
+                    status_code=400, detail=f"{field} 最小为 {floor}（过小会被平台风控）"
+                )
             updates[field] = val
     for field in _NONNEG_INT_FIELDS:
         if field in updates:

@@ -134,6 +134,10 @@ def _new_rel(rel: str, owners: dict, folders_by_platform: dict) -> str:
     # 主播恰好叫「抖音/B站/快手」时新布局路径也像旧布局；第二段是归档栏目即已迁移
     if parts[0] in _CN_PLATFORMS and len(parts) >= 2 and parts[1] in (LIVE_SUBDIR, WORKS_SUBDIR):
         return None
+    # 主播归档目录名恰好叫「works」时，新布局路径 works/直播间|作品/... 会被下面
+    # 的旧 works 分支误判成 旧作品布局（平台=直播间），搬进错误的 {日期}/作品/ 路径
+    if parts[0] == LEGACY_WORKS_ROOT and len(parts) >= 2 and parts[1] in (LIVE_SUBDIR, WORKS_SUBDIR):
+        return None
     if parts[0] == LEGACY_WORKS_ROOT and len(parts) >= 4:
         plat_cn, legacy_dir = parts[1], parts[2]
         tail = parts[3:]
@@ -247,6 +251,16 @@ async def migrate_legacy_layout() -> dict:
         def _rewrite(rel):
             if not rel:
                 return None
+            # 历史记录里的 file_path 可能是绝对路径（monitor 的 join 语义支持）：
+            # 不归一成相对路径，_new_rel 会因首段不是平台名而返回 None，
+            # 磁盘搬迁却已把这些文件移走，DB 就指向旧绝对路径失联
+            if os.path.isabs(rel):
+                try:
+                    rel = os.path.relpath(rel, base)
+                except ValueError:
+                    return None
+                if rel.startswith(".."):
+                    return None
             new_rel = _new_rel(rel, owners, holders)
             if not new_rel:
                 return None
@@ -256,11 +270,18 @@ async def migrate_legacy_layout() -> dict:
                 matches = glob.glob(target.replace("%04d", "*"))
                 if not matches:
                     return None
-                # 与源模板同目录下的实际文件做大小一致性核对（源已搬走时无从比对，
-                # 此时以"目标确实存在"为准）
-                src_abs = os.path.join(base, rel)
-                if os.path.exists(src_abs) and os.path.getsize(src_abs) != os.path.getsize(matches[0]):
-                    return None
+                # 源模板同样按通配取实际分段做大小核对——直接 exists(模板串) 恒为
+                # False，原大小检查形同虚设；源分段还在（搬迁失败/大小不符）时
+                # 任一段不一致就放弃回写，避免 part_paths 指向截断的目标段而
+                # 完整源段孤留旧目录（P1-19 语义）
+                if "%04d" in rel:
+                    src_matches = glob.glob(os.path.join(base, rel).replace("%04d", "*"))
+                    if src_matches:
+                        dst_sizes = {os.path.basename(m): os.path.getsize(m) for m in matches}
+                        for s in src_matches:
+                            d = dst_sizes.get(os.path.basename(s))
+                            if d is None or d != os.path.getsize(s):
+                                return None
                 return new_rel
             if not os.path.isfile(target):
                 return None
