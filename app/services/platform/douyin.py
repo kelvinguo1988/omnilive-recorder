@@ -4,7 +4,7 @@ import logging
 from typing import Optional
 from app.services.platform.base import (
     BasePlatform, RoomInfo, PlatformFactory, UserInfo, WorkInfo,
-    WORKS_UA, WORKS_UA_CHROME_VER,
+    WORKS_UA, WORKS_UA_CHROME_VER, PlatformError, classify_platform_error,
 )
 from app.services.platform.vendor.abogus import ABogus, BrowserFingerprintGenerator
 
@@ -376,12 +376,37 @@ class DouyinPlatform(BasePlatform):
             }
             url = "https://www.douyin.com/aweme/v1/web/aweme/post/?" + self._sign_params(params)
             resp = await self.client.get(url, headers=await self._works_headers())
-            data = resp.json()
+
+            # 关键：抖音风控拦截时返回的是**纯文本**而非 JSON，原实现直接 resp.json()
+            # 会抛 "Expecting value: line 1 column 1 (char 0)"，把真实原因
+            # （如 "Blocked by ArgusSecurityPlugin Uifid Not Found"）完全吞掉，
+            # 用户只看到一句无法理解的解析错误。这里先按状态码/内容分类。
+            if resp.status_code != 200:
+                body = (resp.text or "")[:300]
+                logger.warning(
+                    f"抖音作品接口 HTTP {resp.status_code}: {body[:150]}"
+                )
+                raise classify_platform_error(
+                    f"抖音作品接口 HTTP {resp.status_code}: {body}",
+                    status_code=resp.status_code,
+                )
+
+            try:
+                data = resp.json()
+            except ValueError:
+                # 200 但非 JSON：通常是风控挑战页/空响应
+                body = (resp.text or "")[:300]
+                logger.warning(f"抖音作品接口返回非 JSON: {body[:150]}")
+                raise classify_platform_error(
+                    f"抖音作品接口返回非 JSON（可能被风控）: {body}"
+                ) from None
+
             if data.get("status_code") not in (0, None):
-                raise RuntimeError(
+                msg = (
                     f"抖音作品列表接口失败: status_code={data.get('status_code')} "
                     f"{(data.get('status_msg') or '')[:120]}"
                 )
+                raise classify_platform_error(msg)
             for aweme in data.get("aweme_list") or []:
                 w = self._aweme_to_work(aweme)
                 if w and w.work_id:
@@ -394,11 +419,12 @@ class DouyinPlatform(BasePlatform):
             except (ValueError, TypeError):
                 next_cursor = cursor
             return works, next_cursor, has_more
-        except RuntimeError:
+        except PlatformError:
+            # 已分类（Cookie 失效 / 限流），原样上抛让上层决定告警还是退避
             raise
         except Exception as e:
             logger.error(f"获取抖音作品列表失败 {user_id}: {e}")
-            raise RuntimeError(f"获取抖音作品列表失败: {e}") from e
+            raise classify_platform_error(f"获取抖音作品列表失败: {e}") from e
 
     @staticmethod
     def _aweme_to_work(aweme: dict) -> Optional[WorkInfo]:

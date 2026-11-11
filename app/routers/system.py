@@ -366,6 +366,22 @@ async def _apply_settings(updates: dict):
         logger.error(f"应用设置失败，已回滚内存配置: {e}")
         raise HTTPException(status_code=500, detail=f"保存配置失败（已回滚）: {e}")
 
+    # 用户刚更新了 Cookie：清除该平台的「失效」熔断状态，
+    # 让下一轮作品检查立刻用新 Cookie 重新验证（否则要等暂停期结束）
+    _COOKIE_KEY_TO_PLATFORM = {
+        "douyin_cookie": "douyin",
+        "bilibili_cookie": "bilibili",
+        "kuaishou_cookie": "kuaishou",
+    }
+    for ckey, plat in _COOKIE_KEY_TO_PLATFORM.items():
+        if ckey in updates:
+            from app.services.cookie_health import cookie_health
+            st = cookie_health.get(plat)
+            st.status = "unknown"
+            st.paused_until = 0.0
+            st.fail_count = 0
+            logger.info(f"已重置 {plat} 的 Cookie 失效状态，等待重新验证")
+
     # 代理/cookie 变化：清空已缓存的平台适配器实例，下次检查时按新配置重建
     # P0-2: 使用 _reset_platform_cache 先 close 旧实例再 clear，避免连接泄漏
     if proxy_related_changed:
@@ -388,6 +404,25 @@ async def run_sync_now():
     if stats.get("error"):
         raise HTTPException(status_code=400, detail=stats["error"])
     return {"message": f"同步完成：新复制 {stats['copied']}，跳过 {stats['skipped']}，失败 {stats['failed']}", **stats}
+
+
+@router.get("/cookie-status")
+async def cookie_status():
+    """各平台 Cookie 健康状态
+
+    用于前端在仪表盘/设置页显示「Cookie 已失效，请重新配置」告警。
+    状态来源是运行时观测（最近一次作品拉取的结果），不是配置值。
+    """
+    from app.services.cookie_health import cookie_health
+    items = cookie_health.snapshot()
+    return {
+        "items": items,
+        "needs_action": cookie_health.any_needs_action(),
+        "action_hint": (
+            "有平台 Cookie 已失效，请到「系统设置」重新填写对应平台的 Cookie，"
+            "否则该平台的作品订阅与下载会停止"
+        ) if cookie_health.any_needs_action() else "",
+    }
 
 
 @router.get("/settings/export")

@@ -7,7 +7,7 @@ import logging
 from urllib.parse import urlencode
 from app.services.platform.base import (
     BasePlatform, RoomInfo, PlatformFactory, UserInfo, WorkInfo,
-    CollectionInfo, WORKS_UA,
+    CollectionInfo, WORKS_UA, PlatformError, classify_platform_error,
 )
 
 logger = logging.getLogger(__name__)
@@ -303,11 +303,27 @@ class BilibiliPlatform(BasePlatform):
                 },
                 headers=await self._api_headers(f"https://space.bilibili.com/{user_id}/video"),
             )
-            data = resp.json()
-            if data.get("code") != 0:
-                raise RuntimeError(
-                    f"B站作品列表接口失败: code={data.get('code')} {data.get('message', '')}"
+            if resp.status_code != 200:
+                body = (resp.text or "")[:300]
+                logger.warning(f"B站作品接口 HTTP {resp.status_code}: {body[:150]}")
+                raise classify_platform_error(
+                    f"B站作品接口 HTTP {resp.status_code}: {body}",
+                    status_code=resp.status_code,
                 )
+            try:
+                data = resp.json()
+            except ValueError:
+                body = (resp.text or "")[:300]
+                raise classify_platform_error(
+                    f"B站作品接口返回非 JSON（可能被风控）: {body}"
+                ) from None
+            if data.get("code") != 0:
+                code = data.get("code")
+                msg = (
+                    f"B站作品列表接口失败: code={code} {data.get('message', '')}"
+                )
+                # -412 request was banned 是**风控限流**，不是 Cookie 失效
+                raise classify_platform_error(msg)
             archives = (data.get("data") or {}).get("archives") or []
             for item in archives:
                 w = WorkInfo()
@@ -320,11 +336,11 @@ class BilibiliPlatform(BasePlatform):
                     works.append(w)
             has_more = len(archives) >= min(max(count, 1), 100)
             return works, page, has_more
-        except RuntimeError:
+        except PlatformError:
             raise
         except Exception as e:
             logger.error(f"获取B站作品列表失败 {user_id}: {e}")
-            raise RuntimeError(f"获取B站作品列表失败: {e}") from e
+            raise classify_platform_error(f"获取B站作品列表失败: {e}") from e
 
     async def get_download_urls(self, work: WorkInfo) -> list:
         """解析投稿视频直链（列表接口不含地址，下载时二次解析）。

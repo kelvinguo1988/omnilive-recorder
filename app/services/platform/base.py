@@ -18,6 +18,76 @@ WORKS_UA_CHROME_VER = "131.0.0.0"
 PLATFORM_CN = {"douyin": "抖音", "bilibili": "B站", "kuaishou": "快手"}
 
 
+# ---------------------------------------------------------------- 错误分类
+# 作品订阅拉取失败时，必须区分「Cookie 失效」与「网络抖动/风控限流」：
+# 前者需要用户重新配置 Cookie（且应立即停止重试，否则持续撞风控），
+# 后者只需退避等待。原实现全部抛裸 RuntimeError，上层无从判断。
+
+class PlatformError(RuntimeError):
+    """平台请求失败基类"""
+
+    #: 是否为凭据（Cookie/登录态）失效
+    cookie_invalid: bool = False
+
+
+class CookieInvalidError(PlatformError):
+    """Cookie 失效/缺失 —— 需要用户重新配置，不应重试"""
+
+    cookie_invalid = True
+
+
+class RateLimitedError(PlatformError):
+    """被风控限流（-412/403/429）—— 退避后可能恢复，不是 Cookie 问题"""
+
+    cookie_invalid = False
+
+
+# 各平台的「Cookie 失效」特征串（小写匹配响应体/错误信息）
+_COOKIE_INVALID_MARKERS = (
+    "uifid not found",          # 抖音 ArgusSecurityPlugin：无登录态设备指纹
+    "blocked by argussecurity",
+    "请先登录",
+    "未登录",
+    "not login",
+    "login required",
+    "invalid session",
+    "session expired",
+    "登录已过期",
+    "cookie 已失效",
+    "cookie已失效",
+)
+
+# 各平台的「被风控限流」特征串
+_RATE_LIMIT_MARKERS = (
+    "request was banned",       # B站 -412
+    "too many requests",
+    "429",
+    "频繁",
+)
+
+
+def classify_platform_error(message: str, status_code: int = 0) -> PlatformError:
+    """根据响应特征判断错误类型，返回相应的结构化异常。
+
+    用于把「一串看不懂的报错」翻译成「Cookie 失效」或「被限流」，
+    上层据此决定是告警用户还是仅退避。
+    """
+    text = (message or "").lower()
+
+    if status_code in (401,):
+        return CookieInvalidError(message)
+    if any(m in text for m in _COOKIE_INVALID_MARKERS):
+        return CookieInvalidError(message)
+    if status_code == 403 and any(m in text for m in ("blocked", "forbidden", "uifid")):
+        return CookieInvalidError(message)
+    if status_code == 429 or any(m in text for m in _RATE_LIMIT_MARKERS):
+        return RateLimitedError(message)
+    # 403 但没有明确特征：抖音/B站 的 403 基本都是登录态问题
+    if status_code == 403:
+        return CookieInvalidError(message)
+    return PlatformError(message)
+
+
 @dataclass
 class RoomInfo:
     """直播间信息"""

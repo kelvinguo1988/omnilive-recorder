@@ -166,6 +166,8 @@ function formatSize(mb) {
 // 仪表盘
 async function refreshDashboard() {
     try {
+        // 顺带刷新 Cookie 健康状态（失败不影响仪表盘主体）
+        loadCookieStatus().catch(() => {});
         const info = await API.get('/api/system/info');
         document.getElementById('statRooms').textContent = info.rooms.total;
         document.getElementById('statLive').textContent = info.rooms.live;
@@ -938,6 +940,7 @@ function fillSensitive(s) {
 
 async function loadSettings() {
     try {
+        loadCookieStatus().catch(() => {});
         const info = await API.get('/api/system/info');
         const s = info.settings || {};
 
@@ -1517,3 +1520,74 @@ document.addEventListener('change', (e) => {
         updateCollectionImportBtn();
     }
 });
+
+// ================================================== Cookie 健康状态
+// 解决「Cookie 什么时候失效了不知道」：每次作品拉取后由后端记录实际结果，
+// 这里负责把「已失效」变成用户看得见的告警（仪表盘红条 + 设置页状态点）。
+
+async function loadCookieStatus() {
+    try {
+        const data = await API.get('/api/system/cookie-status');
+        renderCookieAlert(data);
+        renderCookieStatusBox(data);
+        return data;
+    } catch (e) {
+        console.error('Cookie status error:', e);
+        return null;
+    }
+}
+
+function renderCookieAlert(data) {
+    const box = document.getElementById('cookieAlert');
+    if (!box) return;
+    const bad = (data?.items || []).filter(i => i.status === 'invalid');
+    const limited = (data?.items || []).filter(i => i.status === 'rate_limited');
+
+    if (bad.length) {
+        const names = bad.map(i => PLATFORM_NAMES[i.platform] || i.platform).join('、');
+        box.className = 'alert-bar alert-error';
+        box.innerHTML = `
+            <span class="alert-icon">⚠</span>
+            <span class="alert-body">
+                <strong>${escapeHtml(names)} Cookie 已失效</strong>，该平台的作品订阅与下载已暂停。
+                ${bad[0].last_error ? `<br><span class="form-hint">${escapeHtml(bad[0].last_error.slice(0, 160))}</span>` : ''}
+            </span>
+            <span class="alert-actions">
+                <button class="btn btn-sm btn-primary" onclick="switchPage('settings')">去设置</button>
+            </span>`;
+        box.style.display = '';
+        return;
+    }
+    if (limited.length) {
+        const names = limited.map(i => PLATFORM_NAMES[i.platform] || i.platform).join('、');
+        box.className = 'alert-bar alert-warn';
+        box.innerHTML = `
+            <span class="alert-icon">⏳</span>
+            <span class="alert-body">
+                <strong>${escapeHtml(names)} 被平台限流</strong>，已自动放慢请求节奏。
+                这不是 Cookie 问题，稍后会自动恢复；若持续出现可调大「作品检测间隔」。
+            </span>`;
+        box.style.display = '';
+        return;
+    }
+    box.style.display = 'none';
+}
+
+function renderCookieStatusBox(data) {
+    const box = document.getElementById('cookieStatusBox');
+    if (!box) return;
+    const items = data?.items || [];
+    if (!items.length) { box.textContent = '暂无数据'; return; }
+    box.innerHTML = items.map(i => {
+        const name = PLATFORM_NAMES[i.platform] || i.platform;
+        const ago = i.last_ok_ago != null ? formatDuration(i.last_ok_ago) + '前验证通过' : '尚未验证';
+        const extra = i.status === 'invalid' && i.paused_remaining
+            ? ` · 暂停 ${formatDuration(i.paused_remaining)}`
+            : '';
+        return `<span class="cookie-status-item" title="${escapeHtml(i.last_error || '')}">
+            <span class="cookie-dot ${escapeHtml(i.status)}"></span>
+            <span>${escapeHtml(name)}</span>
+            <span class="form-hint">${escapeHtml(i.status_text)}${i.last_ok_ago != null ? ' · ' + ago : ''}${extra}</span>
+        </span>`;
+    }).join('');
+}

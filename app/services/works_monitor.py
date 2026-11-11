@@ -27,7 +27,11 @@ from app.database import async_session
 from app.models import Room, Work
 from app.config import settings
 from app.utils import utcnow
-from app.services.platform.base import WorkInfo, WORKS_UA, PLATFORM_CN
+from app.services.platform.base import (
+    WorkInfo, WORKS_UA, PLATFORM_CN,
+    CookieInvalidError, RateLimitedError,
+)
+from app.services.cookie_health import cookie_health
 from app.services import archive
 from app.services.platform_manager import platform_manager
 from app.services.file_manager import file_manager
@@ -376,6 +380,15 @@ class WorksMonitor:
         """检查单个主播的作品：未回填则全量回填，否则增量拉最新一页"""
         if not room.platform_user_id:
             return
+        # Cookie 失效熔断：该平台 Cookie 已失效时不再自动拉取。
+        # 否则每轮都会带着失效 Cookie 撞一次风控，账号有被拉黑风险。
+        # 用户更新 Cookie 后（设置页保存会清空该状态）自动恢复。
+        if cookie_health.is_paused(room.platform):
+            logger.debug(
+                f"[{PLATFORM_CN.get(room.platform, room.platform)}] Cookie 已失效，"
+                f"暂停自动拉取（主播 {room.streamer_name or room.id}）"
+            )
+            return
         # 风控退避：该主播还在退避期内就跳过，避免反复打同一接口加重封禁
         remain = self._backoff_remaining(room.id)
         if remain > 0:
@@ -420,12 +433,29 @@ class WorksMonitor:
                     room.platform_user_id, 0, settings.works_check_count
                 )
                 added = await self._insert_new_works(room.id, works)
-            # 成功：清空该主播的退避计数
+            # 成功：清空该主播的退避计数，并标记该平台 Cookie 健康
             self._record_success(room.id)
+            cookie_health.mark_ok(room.platform)
+        except CookieInvalidError as e:
+            # Cookie 失效：这是需要用户介入的问题，不是临时抖动。
+            # 立即标记 + 暂停该平台自动拉取，避免持续撞风控把账号打进黑名单。
+            cookie_health.mark_invalid(room.platform, str(e))
+            self._record_failure(room.id)
+            logger.error(
+                f"作品拉取失败 [{PLATFORM_CN.get(room.platform, room.platform)}] "
+                f"{room.streamer_name or room.platform_user_id}: "
+                f"Cookie 已失效，请到「系统设置」重新填写：{e}"
+            )
+        except RateLimitedError as e:
+            # 被限流：Cookie 本身可能没问题，只做退避，不告警为「失效」
+            cookie_health.mark_rate_limited(room.platform, str(e))
+            self._record_failure(room.id)
+            logger.warning(
+                f"作品拉取被限流 [{PLATFORM_CN.get(room.platform, room.platform)}] "
+                f"{room.streamer_name or room.platform_user_id}: {e}"
+            )
         except Exception as e:
-            # 拉取失败（风控/网络/Cookie）：保留 backfill_done=False，但要**指数退避**。
-            # 原实现失败后照常按 works_poll_interval 重试，被风控时会从第 1 页重打
-            # 同一个接口，形成「越封越打、越打越封」的死循环。
+            # 其它错误（网络抖动/解析异常）：保留 backfill_done=False，指数退避
             self._record_failure(room.id)
             logger.warning(
                 f"作品拉取失败 [{PLATFORM_CN.get(room.platform, room.platform)}] "
