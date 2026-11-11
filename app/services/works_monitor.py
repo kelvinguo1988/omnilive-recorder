@@ -71,10 +71,31 @@ def _redact_url(url: str, keep: int = 40) -> str:
         return (url or "")[:keep]
 
 
-# 平台间请求随机间隔（秒）：作品列表拉取后
-CHECK_JITTER = (2.0, 6.0)
-# 同平台相邻下载的最小间隔（秒）
-DOWNLOAD_GAP = (3.0, 7.0)
+# 风控保护：所有间隔都从 settings 读取（后台可调），并带随机抖动。
+# 原实现硬编码 2~6 秒，一轮 10 个主播 20 秒内打完，极易触发 -412/403。
+# 现在默认 30~90 秒，宁可慢也不被封。关闭 works_rate_limit_enabled 则回到快速模式。
+
+
+def _jitter(bound_min: int, bound_max: int) -> float:
+    """在 [min, max] 内取随机间隔；未启用限速时返回 0"""
+    if not settings.works_rate_limit_enabled:
+        return 0.0
+    lo, hi = max(0, int(bound_min)), max(0, int(bound_max))
+    if hi <= lo:
+        return float(lo)
+    return random.uniform(lo, hi)
+
+
+def _check_jitter() -> float:
+    return _jitter(settings.works_check_jitter_min, settings.works_check_jitter_max)
+
+
+def _page_interval() -> float:
+    return _jitter(settings.works_page_interval, settings.works_page_interval)
+
+
+def _download_gap() -> float:
+    return _jitter(settings.works_download_gap_min, settings.works_download_gap_max)
 
 
 class WorksMonitor:
@@ -95,6 +116,35 @@ class WorksMonitor:
         self._check_locks: dict[int, asyncio.Lock] = {}
         # 磁盘水位告警节流
         self._last_disk_warn: float = 0.0
+        # 风控退避状态：{room_id: {"fails": n, "until": ts}}
+        # 被风控后该主播在 until 之前不再检查，且失败次数越多退避越久。
+        # 这是防「越封越打、越打越封」的关键 —— 原实现失败后 600 秒又从第 1 页重打。
+        self._backoff: dict = {}
+
+    def _backoff_remaining(self, room_id: int) -> float:
+        """该主播还剩多少秒退避期；0 表示可以检查"""
+        st = self._backoff.get(room_id)
+        if not st:
+            return 0.0
+        return max(0.0, st["until"] - time.time())
+
+    def _record_failure(self, room_id: int):
+        """记一次拉取失败，按指数退避设置下次可检查时间"""
+        st = self._backoff.setdefault(room_id, {"fails": 0, "until": 0.0})
+        st["fails"] += 1
+        base = max(1, int(settings.works_backoff_base))
+        cap = max(base, int(settings.works_backoff_max))
+        wait = min(base * (2 ** (st["fails"] - 1)), cap)
+        st["until"] = time.time() + wait
+        logger.warning(
+            f"主播 {room_id} 第 {st['fails']} 次拉取失败，退避 {wait // 60} 分钟后再试"
+            f"（风控保护：不重试打同一接口）"
+        )
+        return wait
+
+    def _record_success(self, room_id: int):
+        """拉取成功则清空退避计数"""
+        self._backoff.pop(room_id, None)
 
     def _check_lock_for(self, room_id: int) -> asyncio.Lock:
         """取该主播的检查锁（惰性创建），只串行化同一主播的并发检查"""
@@ -312,7 +362,7 @@ class WorksMonitor:
                 await self.check_room_works(room)
             except Exception as e:
                 logger.error(f"检查主播作品 {room.streamer_name or room.id} 失败: {e}")
-            await asyncio.sleep(random.uniform(*CHECK_JITTER))
+            await asyncio.sleep(_check_jitter())
 
     async def check_room_works_by_id(self, room_id: int):
         """API 触发的立即检查（按 id 重读主播）"""
@@ -325,6 +375,14 @@ class WorksMonitor:
     async def check_room_works(self, room: Room):
         """检查单个主播的作品：未回填则全量回填，否则增量拉最新一页"""
         if not room.platform_user_id:
+            return
+        # 风控退避：该主播还在退避期内就跳过，避免反复打同一接口加重封禁
+        remain = self._backoff_remaining(room.id)
+        if remain > 0:
+            logger.debug(
+                f"主播 {room.streamer_name or room.id} 处于风控退避期，"
+                f"还有 {int(remain // 60)} 分钟，本轮跳过"
+            )
             return
         # P0-10: 只锁该主播自己，不同主播可并行检查（互不阻塞）
         async with self._check_lock_for(room.id):
@@ -362,8 +420,13 @@ class WorksMonitor:
                     room.platform_user_id, 0, settings.works_check_count
                 )
                 added = await self._insert_new_works(room.id, works)
+            # 成功：清空该主播的退避计数
+            self._record_success(room.id)
         except Exception as e:
-            # 拉取失败（风控/网络/Cookie）：保留 backfill_done=False，下个周期自动重试
+            # 拉取失败（风控/网络/Cookie）：保留 backfill_done=False，但要**指数退避**。
+            # 原实现失败后照常按 works_poll_interval 重试，被风控时会从第 1 页重打
+            # 同一个接口，形成「越封越打、越打越封」的死循环。
+            self._record_failure(room.id)
             logger.warning(
                 f"作品拉取失败 [{PLATFORM_CN.get(room.platform, room.platform)}] "
                 f"{room.streamer_name or room.platform_user_id}: {e}"
@@ -416,7 +479,7 @@ class WorksMonitor:
                 logger.warning(f"主播 {label} 翻页游标未前进/无新增，提前终止（防循环）")
                 break
             cursor = next_cursor
-            await asyncio.sleep(random.uniform(2.0, 5.0))
+            await asyncio.sleep(_page_interval())
 
         async with async_session() as session:
             await session.execute(
@@ -577,7 +640,7 @@ class WorksMonitor:
                     continue
                 work = fresh
                 # 平台级随机限速
-                gap = random.uniform(*DOWNLOAD_GAP)
+                gap = _download_gap()
                 wait = self._last_download_ts.get(platform, 0) + gap - time.time()
                 if wait > 0:
                     await asyncio.sleep(wait)

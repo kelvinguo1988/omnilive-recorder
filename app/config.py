@@ -43,6 +43,24 @@ class AppConfig(BaseSettings):
     works_auto_download: bool = True
     works_backfill_limit: int = 0
 
+    # ---- 风控保护（宁可慢，也不要被封）----
+    # works_rate_limit_enabled: 总开关。开启后下列间隔生效。
+    # works_check_jitter_min/max: 相邻两个主播检查之间的随机间隔（秒）。
+    #   默认 30~90 秒 —— 原来硬编码 2~6 秒，一轮 10 个主播 20 秒打完，极易触发风控。
+    # works_page_interval: 同一主播回填翻页之间的间隔（秒）。默认 8 秒。
+    # works_download_gap_min/max: 同平台相邻两个下载之间的随机间隔（秒）。默认 10~25 秒。
+    # works_backoff_base: 被风控（-412/403/空响应）后的退避基数（秒）。
+    #   第 N 次连续失败等 base * 2^(N-1)，上限 works_backoff_max。
+    #   这是防「越封越打、越打越封」的关键：原来失败后 600 秒又从第 1 页重打。
+    works_rate_limit_enabled: bool = True
+    works_check_jitter_min: int = 30
+    works_check_jitter_max: int = 90
+    works_page_interval: int = 8
+    works_download_gap_min: int = 10
+    works_download_gap_max: int = 25
+    works_backoff_base: int = 900
+    works_backoff_max: int = 21600
+
     # 合集下载（B站 合集 / 多P）
     # collection_qn: 请求的画质码。127=最高（实际受账号权限约束），
     #   120=4K / 116=1080P60 / 80=1080P / 64=720P。
@@ -116,6 +134,14 @@ def _get_mapping():
         "works_check_count": int,
         "works_auto_download": lambda x: x.lower() == "true",
         "works_backfill_limit": int,
+        "works_rate_limit_enabled": lambda x: x.lower() == "true",
+        "works_check_jitter_min": int,
+        "works_check_jitter_max": int,
+        "works_page_interval": int,
+        "works_download_gap_min": int,
+        "works_download_gap_max": int,
+        "works_backoff_base": int,
+        "works_backoff_max": int,
         "collection_qn": int,
         "collection_prefer_dash": lambda x: x.lower() == "true",
         "output_dir": str,
@@ -226,6 +252,14 @@ def save_config(config: AppConfig = None) -> bool:
     section["works_check_count"] = str(config.works_check_count)
     section["works_auto_download"] = b(config.works_auto_download)
     section["works_backfill_limit"] = str(config.works_backfill_limit)
+    section["works_rate_limit_enabled"] = b(config.works_rate_limit_enabled)
+    section["works_check_jitter_min"] = str(config.works_check_jitter_min)
+    section["works_check_jitter_max"] = str(config.works_check_jitter_max)
+    section["works_page_interval"] = str(config.works_page_interval)
+    section["works_download_gap_min"] = str(config.works_download_gap_min)
+    section["works_download_gap_max"] = str(config.works_download_gap_max)
+    section["works_backoff_base"] = str(config.works_backoff_base)
+    section["works_backoff_max"] = str(config.works_backoff_max)
     section["collection_qn"] = str(config.collection_qn)
     section["collection_prefer_dash"] = b(config.collection_prefer_dash)
     section["output_dir"] = str(config.output_dir)

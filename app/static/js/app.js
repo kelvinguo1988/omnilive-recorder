@@ -954,6 +954,15 @@ async function loadSettings() {
         setCheck('set_enable_proxy', s.enable_proxy);
         setField('set_works_poll_interval', s.works_poll_interval);
         setField('set_works_backfill_limit', s.works_backfill_limit);
+        // 风控保护项
+        setCheck('set_works_rate_limit_enabled', s.works_rate_limit_enabled);
+        setField('set_works_check_jitter_min', s.works_check_jitter_min);
+        setField('set_works_check_jitter_max', s.works_check_jitter_max);
+        setField('set_works_page_interval', s.works_page_interval);
+        setField('set_works_download_gap_min', s.works_download_gap_min);
+        setField('set_works_download_gap_max', s.works_download_gap_max);
+        setField('set_works_backoff_base', s.works_backoff_base);
+        setField('set_works_backoff_max', s.works_backoff_max);
         // 合集下载：画质码（select 用字符串匹配）与通道（布尔转 'true'/'false'）
         setField('set_collection_qn', String(s.collection_qn ?? 127));
         setField('set_collection_prefer_dash', s.collection_prefer_dash ? 'true' : 'false');
@@ -1066,6 +1075,16 @@ async function saveSettings(e) {
                      "max_disk_usage", "works_check_count", "sync_interval"]) {
         if (!(payload[k] > 0)) delete payload[k];
     }
+    // 风控保护项：0 有语义（=该间隔不等待），因此留空才不提交、显式 0 要提交
+    payload.works_rate_limit_enabled = getCheck('set_works_rate_limit_enabled');
+    for (const k of ["works_check_jitter_min", "works_check_jitter_max",
+                     "works_page_interval", "works_download_gap_min",
+                     "works_download_gap_max", "works_backoff_base",
+                     "works_backoff_max"]) {
+        const v = numberField('set_' + k);
+        if (v !== undefined) payload[k] = Math.trunc(v);
+    }
+
     // 合集下载：画质码是正整数（留空/0 不提交），通道是布尔
     const collQn = parseInt(getField('set_collection_qn'), 10);
     if (collQn > 0) payload.collection_qn = collQn;

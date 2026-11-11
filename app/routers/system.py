@@ -45,6 +45,14 @@ class SettingsUpdate(BaseModel):
     works_check_count: Optional[int] = None
     works_auto_download: Optional[bool] = None
     works_backfill_limit: Optional[int] = None
+    works_rate_limit_enabled: Optional[bool] = None
+    works_check_jitter_min: Optional[int] = None
+    works_check_jitter_max: Optional[int] = None
+    works_page_interval: Optional[int] = None
+    works_download_gap_min: Optional[int] = None
+    works_download_gap_max: Optional[int] = None
+    works_backoff_base: Optional[int] = None
+    works_backoff_max: Optional[int] = None
     collection_qn: Optional[int] = None
     collection_prefer_dash: Optional[bool] = None
     daily_merge_max_gb: Optional[float] = None
@@ -58,7 +66,11 @@ _VALID_FORMATS = {"ts", "flv", "mp4"}
 _INT_FIELDS = ("segment_time", "monitor_interval", "check_timeout",
                "max_disk_usage", "works_poll_interval", "works_check_count",
                "sync_interval", "collection_qn")
-_NONNEG_INT_FIELDS = ("works_backfill_limit", "stream_url_refresh_interval")
+_NONNEG_INT_FIELDS = ("works_backfill_limit", "stream_url_refresh_interval",
+                      "works_check_jitter_min", "works_check_jitter_max",
+                      "works_page_interval", "works_download_gap_min",
+                      "works_download_gap_max", "works_backoff_base",
+                      "works_backoff_max")
 _PROXY_RELATED = ("proxy_addr", "enable_proxy", "douyin_cookie", "bilibili_cookie", "kuaishou_cookie")
 
 # 设置项清单（响应/导出/校验共用，杜绝多处手抄漂移）
