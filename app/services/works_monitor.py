@@ -24,7 +24,7 @@ from urllib.parse import urlparse
 from sqlalchemy import select, update, or_
 
 from app.database import async_session
-from app.models import Room, Work
+from app.models import Room, Work, SystemLog
 from app.config import settings
 from app.utils import utcnow
 from app.services.platform.base import (
@@ -376,6 +376,19 @@ class WorksMonitor:
         if room:
             await self.check_room_works(room)
 
+    async def _log_db(self, level: str, message: str):
+        """把作品订阅的关键失败写进 system_logs（设置页可见）。
+
+        此前失败只走 logger（容器 stdout），Web 界面看不到任何原因，
+        用户只能观察到「没有作品」——排查成本极高。写库自身失败静默吞掉。
+        """
+        try:
+            async with async_session() as session:
+                session.add(SystemLog(level=level, module="works", message=message[:1000]))
+                await session.commit()
+        except Exception:
+            pass
+
     async def check_room_works(self, room: Room):
         """检查单个主播的作品：未回填则全量回填，否则增量拉最新一页"""
         if not room.platform_user_id:
@@ -446,6 +459,12 @@ class WorksMonitor:
                 f"{room.streamer_name or room.platform_user_id}: "
                 f"Cookie 已失效，请到「系统设置」重新填写：{e}"
             )
+            await self._log_db(
+                "error",
+                f"作品拉取失败 [{PLATFORM_CN.get(room.platform, room.platform)}] "
+                f"{room.streamer_name or room.platform_user_id}: Cookie 已失效或被平台风控拦截，"
+                f"已暂停该平台自动拉取。请到「系统设置」重新填写 Cookie：{e}",
+            )
         except RateLimitedError as e:
             # 被限流：Cookie 本身可能没问题，只做退避，不告警为「失效」
             cookie_health.mark_rate_limited(room.platform, str(e))
@@ -454,12 +473,22 @@ class WorksMonitor:
                 f"作品拉取被限流 [{PLATFORM_CN.get(room.platform, room.platform)}] "
                 f"{room.streamer_name or room.platform_user_id}: {e}"
             )
+            await self._log_db(
+                "warning",
+                f"作品拉取被限流 [{PLATFORM_CN.get(room.platform, room.platform)}] "
+                f"{room.streamer_name or room.platform_user_id}: {e}",
+            )
         except Exception as e:
             # 其它错误（网络抖动/解析异常）：保留 backfill_done=False，指数退避
             self._record_failure(room.id)
             logger.warning(
                 f"作品拉取失败 [{PLATFORM_CN.get(room.platform, room.platform)}] "
                 f"{room.streamer_name or room.platform_user_id}: {e}"
+            )
+            await self._log_db(
+                "warning",
+                f"作品拉取失败 [{PLATFORM_CN.get(room.platform, room.platform)}] "
+                f"{room.streamer_name or room.platform_user_id}: {e}",
             )
 
         now = utcnow()

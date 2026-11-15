@@ -577,6 +577,13 @@
                         <div class="form-hint">状态来自最近一次作品拉取的实际结果。显示「已失效」时请重新复制该平台 Cookie 并保存（保存后自动解除暂停）。</div>
                     </div>
                     <div class="form-group">
+                        <label>抖音签名服务地址（作品订阅专用，可选）</label>
+                        <input id="set_douyin_sign_api_url" class="input" type="text" placeholder="http://192.168.1.174:8080" />
+                        <div class="form-hint">抖音 2026-11 起对作品接口启用 Argus 风控网关，内置签名已失效。<br/>
+                        部署 <a href="https://github.com/Evil0ctal/Douyin_TikTok_Download_API" target="_blank">Douyin_TikTok_Download_API</a>（NAS 上 <code>docker run -d -p 8080:80 evil0ctal/douyin-tiktok-download-api</code>，并在其 Web UI 配置抖音登录 Cookie），此处填它的访问地址即可恢复作品订阅。<br/>
+                        留空则直连（当前会被 403 拦截，原因见系统日志）。<strong>直播录制不受影响，无需此服务。</strong></div>
+                    </div>
+                    <div class="form-group">
                         <label>抖音 Cookie（可选，部分直播间需要登录态）</label>
                         <textarea id="set_douyin_cookie" class="input" rows="3" style="resize:vertical;font-family:monospace" placeholder="例如: ttwid=xxxx; sid_tt=xxxx; sessionid=xxxx"></textarea>
                         <div class="form-hint">出于安全，已保存的 Cookie 不会回显到页面（同网段他人也读不到）。粘贴新的覆盖、留空保持不变、单独输入 - 清除。示例格式见灰色占位文本，可从浏览器开发者工具复制</div>

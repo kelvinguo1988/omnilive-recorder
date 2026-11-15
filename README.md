@@ -290,7 +290,24 @@ omnilive-recorder/
 旧版本存在下载饥饿（回填期间下载队列不运行），更新到最新代码重建即可。修复后回填与下载并行，作品入库 10 秒内开始下载。
 
 **Q: 抖音下载批量失败 / 列表拉取报错？**
-更新「系统设置 → 抖音 Cookie」后重试；失败的点「重新下载」。平台风控策略会变化，登录态 Cookie 是最稳的方式。
+先看「系统设置 → 系统日志」——作品拉取失败的原因现在会落库展示。若日志出现 `Blocked by ArgusSecurityPlugin`，见下一节的签名服务部署。
+
+### 抖音作品订阅：Argus 风控与签名服务（2026-11 起）
+
+抖音对作品/用户 Web API 上线了 **ArgusSecurityPlugin 网关**：请求必须携带 `uifid`（登录态 Cookie 里的设备指纹）、配套签名与 Chrome TLS 指纹，纯 Python 签名方案（a_bogus）已被全面拦截，开源社区均已转向专职签名服务。**影响范围：仅抖音作品订阅；直播录制（实测正常）与 B站/快手作品不受影响。**
+
+恢复方法——在 NAS 上多跑一个签名服务容器，然后在本项目设置里填它的地址：
+
+1. 部署 [Douyin_TikTok_Download_API](https://github.com/Evil0ctal/Douyin_TikTok_Download_API)（Container Station 或 SSH）：
+   ```bash
+   docker run -d --name dtk -p 8080:80 evil0ctal/douyin-tiktok-download-api
+   ```
+   打开 `http://<NAS_IP>:8080/docs` 能看到接口文档即部署成功。
+2. 按该项目文档在其 Web 界面导入你的**抖音登录 Cookie**（含 UIFID 的那份，与本项目设置页用的是同一份），合集/作品接口需要登录身份。
+3. 本项目「系统设置 → 抖音签名服务地址」填 `http://<NAS_IP>:8080`，保存。
+4. 验证：主播管理 → 查作品；若报 `IDENTITY_LOGIN_REQUIRED` 之类，是签名服务侧的身份冷却/未配置，按其文档处理。
+
+工作原理：配置后，本项目的抖音作品/用户请求代理给签名服务（`/douyin/web/fetch_user_post_videos`、`/douyin/web/handler_user_profile` 经典契约），uifid/签名/TLS 对抗全部由服务端完成；失败原因照常落库到系统日志。留空该地址则走内置签名直连（当前会被 403 拦截）。
 
 **Q: 快手什么都检测不到？**
 快手必须配置登录态 Cookie（游客态被风控），且地址必须含 `/u/` 路径。

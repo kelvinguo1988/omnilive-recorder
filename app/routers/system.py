@@ -39,6 +39,7 @@ class SettingsUpdate(BaseModel):
     enable_proxy: Optional[bool] = None
     proxy_addr: Optional[str] = None
     douyin_cookie: Optional[str] = None
+    douyin_sign_api_url: Optional[str] = None
     bilibili_cookie: Optional[str] = None
     kuaishou_cookie: Optional[str] = None
     works_poll_interval: Optional[int] = None
@@ -249,6 +250,13 @@ async def _apply_settings(updates: dict):
             del updates[key]
     if not updates:
         raise HTTPException(status_code=400, detail="未提供任何要更新的设置项")
+
+    # 外部签名服务地址：空=内置签名直连；填写时必须 http(s):// 开头
+    if "douyin_sign_api_url" in updates:
+        u = (updates["douyin_sign_api_url"] or "").strip()
+        if u and not (u.startswith("http://") or u.startswith("https://")):
+            raise HTTPException(status_code=400, detail="抖音签名服务地址必须以 http:// 或 https:// 开头")
+        updates["douyin_sign_api_url"] = u.rstrip("/")
 
     # 校验录制格式
     if "record_format" in updates and updates["record_format"] not in _VALID_FORMATS:

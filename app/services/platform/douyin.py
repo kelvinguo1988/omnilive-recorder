@@ -2,6 +2,7 @@
 import re
 import logging
 from typing import Optional
+from app.config import settings
 from app.services.platform.base import (
     BasePlatform, RoomInfo, PlatformFactory, UserInfo, WorkInfo,
     WORKS_UA, WORKS_UA_CHROME_VER, PlatformError, classify_platform_error,
@@ -310,6 +311,15 @@ class DouyinPlatform(BasePlatform):
             "Cookie": cookie,
         }
 
+    def _cookie_field(self, name: str) -> str:
+        """从 Cookie 串里取指定字段的值（如 UIFID/UIFID_TEMP/msToken）"""
+        cookie = self.cookie or ""
+        for part in cookie.split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == name and v:
+                return v
+        return ""
+
     def _sign_params(self, params: dict) -> str:
         """对查询串做 a_bogus 签名，返回已附加 a_bogus 的完整参数串
 
@@ -317,13 +327,90 @@ class DouyinPlatform(BasePlatform):
         生成一次。原实现每次调用都 ABogus(user_agent=WORKS_UA) 新建实例，
         构造函数里的 random.randint 让屏宽/高/outer 尺寸逐请求漂移，
         同一会话的指纹前后不一致 —— 这是抖音 -352/空列表的高发诱因。
+
+        P2-U: Cookie 里有 UIFID 时必须同步注入 query 的 uifid 参数 ——
+        2026-11 起作品/用户接口被 ArgusSecurityPlugin 网关拦截，缺 uifid
+        直接 403 "Blocked by ArgusSecurityPlugin Uifid Not Found"（游客态
+        ttwid 不含 UIFID，此参数只能来自登录态 Cookie）。
         """
+        if "uifid" not in params:
+            uifid = self._cookie_field("UIFID") or self._cookie_field("UIFID_TEMP")
+            if uifid:
+                params["uifid"] = uifid
         qs = "&".join(f"{k}={v}" for k, v in params.items())
         return _get_abogus_signer(WORKS_UA).generate_abogus(qs)[0]
+
+    # ---------- 外部签名服务（Douyin_TikTok_Download_API 等） ----------
+
+    def _sign_api_url(self) -> str:
+        """外部签名服务基地址（空=未启用内置 a_bogus 直连路径）"""
+        return (getattr(settings, "douyin_sign_api_url", "") or "").rstrip("/")
+
+    async def _sign_api_get(self, path: str, params: dict) -> dict:
+        """调用外部签名服务的通用 GET：服务端内部完成 uifid/签名/TLS 对抗。
+
+        经典契约（V4.x，NAS 部署最广）：响应 {code:200, data:{...}}；
+        服务端失败返回 HTTP 400 + detail。非 200/code!=200 统一按平台错误分类，
+        让上层 Cookie 熔断/退避/UI 日志机制照常工作。
+        """
+        url = f"{self._sign_api_url()}{path}"
+        resp = await self.client.get(url, params=params)
+        if resp.status_code != 200:
+            detail = resp.text[:300]
+            raise classify_platform_error(
+                f"抖音签名服务 HTTP {resp.status_code}: {detail}",
+                status_code=resp.status_code,
+            )
+        try:
+            payload = resp.json()
+        except ValueError:
+            raise classify_platform_error(
+                f"抖音签名服务返回非 JSON: {(resp.text or '')[:200]}"
+            ) from None
+        if payload.get("code") not in (200, 0, None):
+            raise classify_platform_error(
+                f"抖音签名服务业务失败: code={payload.get('code')} "
+                f"{str(payload.get('detail') or payload.get('message') or '')[:200]}"
+            )
+        return payload.get("data") or {}
+
+    async def _fetch_user_works_via_api(self, user_id: str, cursor: int, count: int):
+        """经外部签名服务拉取作品列表（响应结构与抖音 Web API 一致，复用解析）"""
+        data = await self._sign_api_get("/douyin/web/fetch_user_post_videos", {
+            "sec_user_id": user_id,
+            "max_cursor": str(cursor),
+            "count": str(count),
+        })
+        works = []
+        for aweme in data.get("aweme_list") or []:
+            w = self._aweme_to_work(aweme)
+            if w and w.work_id:
+                works.append(w)
+        has_more = data.get("has_more") in (1, True, "1")
+        try:
+            raw = data.get("max_cursor")
+            next_cursor = int(raw) if raw is not None else cursor
+        except (ValueError, TypeError):
+            next_cursor = cursor
+        return works, next_cursor, has_more
 
     async def get_user_info(self, user_id: str) -> UserInfo:
         info = UserInfo(user_id=user_id)
         if not user_id:
+            return info
+        if self._sign_api_url():
+            # 外部签名服务路径：服务端自行对抗 Argus（需在服务内配置登录身份）
+            try:
+                data = await self._sign_api_get("/douyin/web/handler_user_profile", {
+                    "sec_user_id": user_id,
+                })
+                user = (data.get("user") or {}) if isinstance(data, dict) else {}
+                info.nickname = user.get("nickname") or ""
+                thumb = (user.get("avatar_thumb") or {}).get("url_list") or []
+                if thumb:
+                    info.avatar_url = thumb[0]
+            except Exception as e:
+                logger.warning(f"签名服务获取抖音用户信息失败 {user_id}: {e}")
             return info
         try:
             params = {
@@ -357,6 +444,10 @@ class DouyinPlatform(BasePlatform):
 
     async def get_user_works(self, user_id: str, cursor: int = 0, count: int = 20):
         """分页获取作品列表。cursor 为接口 max_cursor（时间戳语义），原样回传。"""
+        # 外部签名服务路径：Argus 网关（uifid+签名+TLS 指纹）下内置 a_bogus 直连已失效，
+        # 配置了签名服务就走它，由服务端完成对抗
+        if self._sign_api_url():
+            return await self._fetch_user_works_via_api(user_id, cursor, count)
         works = []
         try:
             params = {
