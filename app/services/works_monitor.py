@@ -475,6 +475,12 @@ class WorksMonitor:
                 f"{room.streamer_name or room.platform_user_id}: "
                 f"请求签名被平台拦截（Cookie 正常，需接入签名服务）：{e}"
             )
+            await self._log_db(
+                "error",
+                f"作品拉取失败 [{PLATFORM_CN.get(room.platform, room.platform)}] "
+                f"{room.streamer_name or room.platform_user_id}: 请求签名被平台拦截"
+                f"（Cookie 正常）：{e}",
+            )
         except RateLimitedError as e:
             # 被限流：Cookie 本身可能没问题，只做退避，不告警为「失效」
             cookie_health.mark_rate_limited(room.platform, str(e))
