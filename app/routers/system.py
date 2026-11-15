@@ -423,13 +423,32 @@ async def cookie_status():
     """
     from app.services.cookie_health import cookie_health
     items = cookie_health.snapshot()
+    # 区分两种「需要介入」：换 Cookie vs 配签名服务 —— 给的指引完全不同，
+    # 混在一起会让用户反复重填 Cookie 却毫无改善（这正是之前的误报来源）。
+    invalid = [i for i in items if i["status"] == "invalid"]
+    sig_blocked = [i for i in items if i["status"] == "signature_blocked"]
+
+    hints = []
+    if invalid:
+        names = "、".join(
+            {"douyin": "抖音", "bilibili": "B站", "kuaishou": "快手"}.get(i["platform"], i["platform"])
+            for i in invalid
+        )
+        hints.append(f"{names} Cookie 已失效，请到「系统设置」重新填写 Cookie")
+    if sig_blocked:
+        names = "、".join(
+            {"douyin": "抖音", "bilibili": "B站", "kuaishou": "快手"}.get(i["platform"], i["platform"])
+            for i in sig_blocked
+        )
+        hints.append(
+            f"{names} 的 Cookie 本身正常，但请求签名被平台风控拦截 —— "
+            f"重新填 Cookie 无效，需要在「系统设置」配置抖音签名服务地址"
+        )
+
     return {
         "items": items,
         "needs_action": cookie_health.any_needs_action(),
-        "action_hint": (
-            "有平台 Cookie 已失效，请到「系统设置」重新填写对应平台的 Cookie，"
-            "否则该平台的作品订阅与下载会停止"
-        ) if cookie_health.any_needs_action() else "",
+        "action_hint": "；".join(hints),
     }
 
 

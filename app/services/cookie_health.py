@@ -25,6 +25,7 @@ STATUS_UNKNOWN = "unknown"      # 尚未验证过
 STATUS_OK = "ok"                # 最近一次验证通过
 STATUS_INVALID = "invalid"      # 最近一次验证明确失败（Cookie 问题）
 STATUS_RATE_LIMITED = "rate_limited"  # 被限流（Cookie 可能没问题）
+STATUS_SIGNATURE_BLOCKED = "signature_blocked"  # 签名被拦（Cookie 没问题，需升级签名方案）
 
 # 失效后暂停该平台自动拉取的时长（秒）：避免持续撞风控
 INVALID_PAUSE_SECONDS = 3600
@@ -69,6 +70,22 @@ class CookieHealth:
         self.last_error = (error or "")[:300]
         # 限流不清空 last_ok，说明 Cookie 本身可能是好的
 
+    def mark_signature_blocked(self, error: str):
+        """标记签名层被拦：Cookie 是好的，问题在签名算法。
+
+        与 mark_invalid 的区别：**不要求用户换 Cookie**（换了也没用），
+        而是提示「需要接入签名服务」。仍暂停自动拉取以免持续撞风控。
+        """
+        self.status = STATUS_SIGNATURE_BLOCKED
+        self.last_fail_ts = time.time()
+        self.fail_count += 1
+        self.last_error = (error or "")[:300]
+        self.paused_until = time.time() + INVALID_PAUSE_SECONDS
+        logger.error(
+            f"[{self.platform}] 请求签名被平台拦截（Cookie 本身可能正常），"
+            f"暂停自动拉取 {INVALID_PAUSE_SECONDS // 60} 分钟：{self.last_error[:120]}"
+        )
+
     def is_paused(self) -> bool:
         return time.time() < self.paused_until
 
@@ -86,6 +103,7 @@ class CookieHealth:
                 STATUS_OK: "正常",
                 STATUS_INVALID: "已失效",
                 STATUS_RATE_LIMITED: "被限流",
+                STATUS_SIGNATURE_BLOCKED: "签名被拦",
             }.get(self.status, self.status),
             "last_ok_ago": ago(self.last_ok_ts),
             "last_fail_ago": ago(self.last_fail_ts),
@@ -95,7 +113,14 @@ class CookieHealth:
             "paused_remaining": (
                 int(self.paused_until - now) if self.is_paused() else 0
             ),
-            "needs_action": self.status == STATUS_INVALID,
+            # needs_action: 需要用户介入。签名被拦也需要介入，但方式是配置签名服务
+            # 而不是重填 Cookie —— 由 action_hint 区分说明。
+            "needs_action": self.status in (STATUS_INVALID, STATUS_SIGNATURE_BLOCKED),
+            "action_type": (
+                "configure_sign_api" if self.status == STATUS_SIGNATURE_BLOCKED
+                else "update_cookie" if self.status == STATUS_INVALID
+                else ""
+            ),
         }
 
 
@@ -121,12 +146,18 @@ class CookieHealthRegistry:
     def mark_rate_limited(self, platform: str, error: str):
         self.get(platform).mark_rate_limited(error)
 
+    def mark_signature_blocked(self, platform: str, error: str):
+        self.get(platform).mark_signature_blocked(error)
+
     def is_paused(self, platform: str) -> bool:
         """该平台是否因 Cookie 失效而暂停自动拉取"""
         return self.get(platform).is_paused()
 
     def any_needs_action(self) -> bool:
-        return any(i.status == STATUS_INVALID for i in self._items.values())
+        return any(
+            i.status in (STATUS_INVALID, STATUS_SIGNATURE_BLOCKED)
+            for i in self._items.values()
+        )
 
     def snapshot(self) -> list:
         """所有平台状态（含未出现过的平台，保证前端列表完整）"""

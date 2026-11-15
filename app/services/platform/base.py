@@ -42,10 +42,19 @@ class RateLimitedError(PlatformError):
     cookie_invalid = False
 
 
+class SignatureBlockedError(PlatformError):
+    """请求签名被平台风控拦截（如抖音 Argus Signature Not Found）。
+
+    Cookie/登录态可能是好的，问题在于签名算法过不了网关。
+    换 Cookie 无用，需要升级签名方案（例如接入外部签名服务）。
+    """
+
+    cookie_invalid = False
+
+
 # 各平台的「Cookie 失效」特征串（小写匹配响应体/错误信息）
 _COOKIE_INVALID_MARKERS = (
-    "uifid not found",          # 抖音 ArgusSecurityPlugin：无登录态设备指纹
-    "blocked by argussecurity",
+    "uifid not found",          # 抖音 ArgusSecurityPlugin：**缺**设备指纹（真 Cookie 问题）
     "请先登录",
     "未登录",
     "not login",
@@ -55,6 +64,18 @@ _COOKIE_INVALID_MARKERS = (
     "登录已过期",
     "cookie 已失效",
     "cookie已失效",
+)
+
+# 「签名层被拦」特征串：Cookie/登录态是好的，但请求签名算法过不了平台风控。
+# 典型：抖音 ArgusSecurityPlugin "Signature Not Found"。
+# 这类错误**换 Cookie 无用**，需要升级签名方案（如接入外部签名服务），
+# 不能误报成「Cookie 已失效」——否则用户会反复重填 Cookie 却毫无改善。
+_SIGNATURE_BLOCKED_MARKERS = (
+    "signature not found",
+    "argussecurityplugin signature",
+    "invalid signature",
+    "签名校验失败",
+    "签名错误",
 )
 
 # 各平台的「被风控限流」特征串
@@ -74,17 +95,30 @@ def classify_platform_error(message: str, status_code: int = 0) -> PlatformError
     """
     text = (message or "").lower()
 
-    if status_code in (401,):
+    # 1) 签名层被拦优先级最高：这类错误即使带了正确 Cookie 也会发生，
+    #    若误判成「Cookie 失效」，用户会反复重填 Cookie 却毫无改善。
+    if any(m in text for m in _SIGNATURE_BLOCKED_MARKERS):
+        return SignatureBlockedError(message)
+
+    # 2) Cookie/登录态问题
+    if status_code == 401:
         return CookieInvalidError(message)
     if any(m in text for m in _COOKIE_INVALID_MARKERS):
         return CookieInvalidError(message)
-    if status_code == 403 and any(m in text for m in ("blocked", "forbidden", "uifid")):
+    # 注意：仅当明确提到 "uifid not found"（缺指纹）才算 Cookie 问题。
+    # 原实现把 "blocked by argussecurity" 也算 Cookie 失效，导致
+    # "Signature Not Found" 被误报 —— 那是签名问题。
+    if status_code == 403 and "uifid" in text and "not found" in text:
         return CookieInvalidError(message)
+
+    # 3) 限流
     if status_code == 429 or any(m in text for m in _RATE_LIMIT_MARKERS):
         return RateLimitedError(message)
-    # 403 但没有明确特征：抖音/B站 的 403 基本都是登录态问题
+
+    # 4) 其余 403：抖音/B站 的风控拦截，归为签名/风控层而非 Cookie
     if status_code == 403:
-        return CookieInvalidError(message)
+        return SignatureBlockedError(message)
+
     return PlatformError(message)
 
 

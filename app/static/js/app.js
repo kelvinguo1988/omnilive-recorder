@@ -1541,7 +1541,29 @@ function renderCookieAlert(data) {
     const box = document.getElementById('cookieAlert');
     if (!box) return;
     const bad = (data?.items || []).filter(i => i.status === 'invalid');
+    const sigBlocked = (data?.items || []).filter(i => i.status === 'signature_blocked');
     const limited = (data?.items || []).filter(i => i.status === 'rate_limited');
+
+    // 签名被拦：Cookie 是好的，指引是「配签名服务」而不是「重填 Cookie」。
+    // 单独一个分支，避免和真正的 Cookie 失效混淆（否则用户会反复重填 Cookie）。
+    if (sigBlocked.length) {
+        const names = sigBlocked.map(i => PLATFORM_NAMES[i.platform] || i.platform).join('、');
+        box.className = 'alert-bar alert-warn';
+        box.innerHTML = `
+            <span class="alert-icon">🔒</span>
+            <span class="alert-body">
+                <strong>${escapeHtml(names)} Cookie 正常，但请求签名被平台风控拦截</strong>，
+                作品订阅已暂停。<br>
+                <span class="form-hint">重新填写 Cookie 无法解决（签名算法过不了平台网关），
+                需要在「系统设置 → 抖音签名服务地址」配置外部签名服务。</span>
+                ${sigBlocked[0].last_error ? `<br><span class="form-hint">${escapeHtml(sigBlocked[0].last_error.slice(0, 140))}</span>` : ''}
+            </span>
+            <span class="alert-actions">
+                <button class="btn btn-sm btn-primary" onclick="switchPage('settings')">去设置</button>
+            </span>`;
+        box.style.display = '';
+        return;
+    }
 
     if (bad.length) {
         const names = bad.map(i => PLATFORM_NAMES[i.platform] || i.platform).join('、');
@@ -1584,8 +1606,9 @@ function renderCookieStatusBox(data) {
         const extra = i.status === 'invalid' && i.paused_remaining
             ? ` · 暂停 ${formatDuration(i.paused_remaining)}`
             : '';
+        const dotCls = i.status === 'signature_blocked' ? 'rate_limited' : i.status;
         return `<span class="cookie-status-item" title="${escapeHtml(i.last_error || '')}">
-            <span class="cookie-dot ${escapeHtml(i.status)}"></span>
+            <span class="cookie-dot ${escapeHtml(dotCls)}"></span>
             <span>${escapeHtml(name)}</span>
             <span class="form-hint">${escapeHtml(i.status_text)}${i.last_ok_ago != null ? ' · ' + ago : ''}${extra}</span>
         </span>`;

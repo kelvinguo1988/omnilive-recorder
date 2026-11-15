@@ -29,7 +29,7 @@ from app.config import settings
 from app.utils import utcnow
 from app.services.platform.base import (
     WorkInfo, WORKS_UA, PLATFORM_CN,
-    CookieInvalidError, RateLimitedError,
+    CookieInvalidError, RateLimitedError, SignatureBlockedError,
 )
 from app.services.cookie_health import cookie_health
 from app.services import archive
@@ -464,6 +464,16 @@ class WorksMonitor:
                 f"作品拉取失败 [{PLATFORM_CN.get(room.platform, room.platform)}] "
                 f"{room.streamer_name or room.platform_user_id}: Cookie 已失效或被平台风控拦截，"
                 f"已暂停该平台自动拉取。请到「系统设置」重新填写 Cookie：{e}",
+            )
+        except SignatureBlockedError as e:
+            # 签名层被拦：Cookie 是好的，换 Cookie 无用。
+            # 提示用户去配置签名服务（而不是反复重填 Cookie）。
+            cookie_health.mark_signature_blocked(room.platform, str(e))
+            self._record_failure(room.id)
+            logger.error(
+                f"作品拉取失败 [{PLATFORM_CN.get(room.platform, room.platform)}] "
+                f"{room.streamer_name or room.platform_user_id}: "
+                f"请求签名被平台拦截（Cookie 正常，需接入签名服务）：{e}"
             )
         except RateLimitedError as e:
             # 被限流：Cookie 本身可能没问题，只做退避，不告警为「失效」
