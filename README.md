@@ -289,25 +289,46 @@ omnilive-recorder/
 **Q: 作品一直「待下载」？**
 旧版本存在下载饥饿（回填期间下载队列不运行），更新到最新代码重建即可。修复后回填与下载并行，作品入库 10 秒内开始下载。
 
-**Q: 抖音下载批量失败 / 列表拉取报错？**
-先看「系统设置 → 系统日志」——作品拉取失败的原因现在会落库展示。若日志出现 `Blocked by ArgusSecurityPlugin`，见下一节的签名服务部署。
+**Q: 抖音作品拉取失败 / 报 `Blocked by ArgusSecurityPlugin`？**
+先看「系统设置 → 系统日志」——失败原因会落库展示（Web 界面可见，不必进容器看 stdout）。
+本项目已内置 Argus 签名实现，正常情况下**不需要额外部署服务**，详见下一节。
 
-### 抖音作品订阅：Argus 风控与签名服务（2026-11 起）
+### 抖音作品订阅：Argus 签名（2026-11 起，已内置支持）
 
-抖音对作品/用户 Web API 上线了 **ArgusSecurityPlugin 网关**：请求必须携带 `uifid`（登录态 Cookie 里的设备指纹）、配套签名与 Chrome TLS 指纹，纯 Python 签名方案（a_bogus）已被全面拦截，开源社区均已转向专职签名服务。**影响范围：仅抖音作品订阅；直播录制（实测正常）与 B站/快手作品不受影响。**
+抖音对作品/用户 Web API 上线了 **ArgusSecurityPlugin 网关**。一个请求要通过它，需要三样东西：
 
-恢复方法——在 NAS 上多跑一个签名服务容器，然后在本项目设置里填它的地址：
+| 要素 | 本项目处理方式 |
+|---|---|
+| `uifid`（设备指纹） | 从你配置的抖音 Cookie 中自动提取 |
+| `x-secsdk-web-signature` 签名 | **内置纯 Python 实现**（`vendor/websign.py`，移植自 DTK v5.1.11，Apache-2.0） |
+| Chrome TLS 指纹 | 使用 `wreq`（Rust 实现，Chrome 131 指纹）；缺失时回退 httpx 并告警 |
 
-1. 部署 [Douyin_TikTok_Download_API](https://github.com/Evil0ctal/Douyin_TikTok_Download_API)（Container Station 或 SSH）：
-   ```bash
-   docker run -d --name dtk -p 8080:80 evil0ctal/douyin-tiktok-download-api
-   ```
-   打开 `http://<NAS_IP>:8080/docs` 能看到接口文档即部署成功。
-2. 按该项目文档在其 Web 界面导入你的**抖音登录 Cookie**（含 UIFID 的那份，与本项目设置页用的是同一份），合集/作品接口需要登录身份。
-3. 本项目「系统设置 → 抖音签名服务地址」填 `http://<NAS_IP>:8080`，保存。
-4. 验证：主播管理 → 查作品；若报 `IDENTITY_LOGIN_REQUIRED` 之类，是签名服务侧的身份冷却/未配置，按其文档处理。
+签名算法为 `md5(f"{uifid}_{timestamp}_{SALT}_{query}")`，参数顺序 `a_bogus → verifyFp → fp → uifid → timestamp → signature`。
+实测：正确签名 → HTTP 200 通过网关校验；坏签名/无签名 → 403 `Sign Invalid`。
 
-工作原理：配置后，本项目的抖音作品/用户请求代理给签名服务（`/douyin/web/fetch_user_post_videos`、`/douyin/web/handler_user_profile` 经典契约），uifid/签名/TLS 对抗全部由服务端完成；失败原因照常落库到系统日志。留空该地址则走内置签名直连（当前会被 403 拦截）。
+**影响范围：仅抖音作品订阅。** 直播录制（走 `enter` 接口，不过 Argus 网关）与 B站/快手作品均不受影响。
+
+#### 你需要做的：配置登录态 Cookie
+
+签名虽已内置，但**作品数据本身需要登录身份**才能返回。游客态即使签名正确也会得到空列表（HTTP 200 但 `aweme_list` 为空）。
+
+1. 浏览器登录 `https://www.douyin.com`
+2. F12 → Network → 刷新 → 点任意 `douyin.com` 请求 → 复制请求头里的整行 `Cookie:`
+3. 本项目「系统设置 → 抖音 Cookie」粘贴保存（要含 `UIFID` 与 `sessionid`）
+
+保存后点主播行的「查作品」立即验证，不用等轮询。
+
+#### 诊断对照表
+
+| 系统日志/界面显示 | 含义 | 处理 |
+|---|---|---|
+| 签名被拦（`Signature Not Found` / `Sign Invalid`） | 签名层问题 | 确认镜像含 `wreq`（`docker exec live-recorder python3 -c "import wreq"`）；缺则重建镜像 |
+| Cookie 已失效（`Uifid Not Found`） | Cookie 缺 UIFID 或已过期 | 重新复制登录态 Cookie |
+| 拉取成功但 0 条 | 游客身份，无数据权限 | 配置登录态 Cookie |
+| 被限流 | 请求过密 | 无需操作，已自动退避 |
+
+> 历史方案说明：早期版本曾支持「外部签名服务」（`Douyin_TikTok_Download_API`，设置项 `douyin_sign_api_url`）。
+> 该配置项仍然保留可用，但**内置签名已覆盖同样能力**，一般无需再部署额外容器。
 
 **Q: 快手什么都检测不到？**
 快手必须配置登录态 Cookie（游客态被风控），且地址必须含 `/u/` 路径。

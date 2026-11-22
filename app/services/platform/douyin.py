@@ -8,9 +8,19 @@ from app.config import settings
 from app.services.platform.base import (
     BasePlatform, RoomInfo, PlatformFactory, UserInfo, WorkInfo,
     WORKS_UA, WORKS_UA_CHROME_VER, PlatformError, classify_platform_error,
+    CookieInvalidError,
 )
 from app.services.platform.vendor.abogus import ABogus, BrowserFingerprintGenerator
 from app.services.platform.vendor.websign import sign as websign_sign
+
+# wreq 是 Rust 实现的 TLS 指纹客户端（Chrome131），Argus 网关会静默拒绝
+# Python 原生 TLS（返回 200 空体）。缺失时回退 httpx 并告警，不阻断启动。
+try:
+    import wreq  # noqa: F401
+    _WREQ_AVAILABLE = True
+except ImportError:  # pragma: no cover - 取决于部署环境
+    wreq = None
+    _WREQ_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
