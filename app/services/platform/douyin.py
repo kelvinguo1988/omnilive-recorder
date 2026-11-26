@@ -13,15 +13,6 @@ from app.services.platform.base import (
 from app.services.platform.vendor.abogus import ABogus, BrowserFingerprintGenerator
 from app.services.platform.vendor.websign import sign as websign_sign
 
-# wreq 是 Rust 实现的 TLS 指纹客户端（Chrome131），Argus 网关会静默拒绝
-# Python 原生 TLS（返回 200 空体）。缺失时回退 httpx 并告警，不阻断启动。
-try:
-    import wreq  # noqa: F401
-    _WREQ_AVAILABLE = True
-except ImportError:  # pragma: no cover - 取决于部署环境
-    wreq = None
-    _WREQ_AVAILABLE = False
-
 logger = logging.getLogger(__name__)
 
 # a_bogus 签名器缓存（按 UA 键控，进程级复用）。
@@ -478,7 +469,6 @@ class DouyinPlatform(BasePlatform):
             signed = self._sign_params(params)
             query, ws_headers = self._websign(signed)
             url = "https://www.douyin.com/aweme/v1/web/user/profile/other/?" + query
-            wreq_client = self._works_wreq_client()
             works_headers = {
                 "Referer": "https://www.douyin.com/",
                 "Accept": "application/json, text/plain, */*",
@@ -491,19 +481,15 @@ class DouyinPlatform(BasePlatform):
                 "sec-fetch-dest": "empty",
                 **ws_headers,
             }
-            if wreq_client is not None:
-                resp = await wreq_client.get(url, headers=works_headers)
-                status, text = resp.status, await resp.text()
-                if status != 200:
-                    raise classify_platform_error(
-                        f"抖音用户信息接口 HTTP {status}: {text}", status_code=status
-                    )
-                data = json.loads(text)
-            else:
-                resp = await self.client.get(
-                    url, headers={**await self._works_headers(), **works_headers}
+            resp = await self.client.get(
+                url, headers={**await self._works_headers(), **works_headers}
+            )
+            if resp.status_code != 200:
+                raise classify_platform_error(
+                    f"抖音用户信息接口 HTTP {resp.status_code}: {resp.text}",
+                    status_code=resp.status_code,
                 )
-                data = resp.json()
+            data = resp.json()
             if data.get("status_code") == 0:
                 user = data.get("user") or {}
                 info.nickname = user.get("nickname") or ""
@@ -534,40 +520,9 @@ class DouyinPlatform(BasePlatform):
         rng = random.Random()
         return "".join(rng.choice(self._MS_ALPHABET) for _ in range(126)) + "=="
 
-    def _works_wreq_client(self):
-        """作品接口专用 wreq 客户端（Chrome131 TLS 指纹 + Cookie jar）。
-
-        Argus 网关除签名外还校验 TLS 指纹——httpx 的 Python TLS 会被
-        静默拒绝（200 空响应体），必须用浏览器指纹的 TLS 栈。wreq 是
-        reqwest 的 Python 绑定（DTK 同款传输层），缺失时返回 None 回退 httpx
-        （此时抖音作品会拿到空响应体并在日志中如实呈现）。
-        """
-        if not getattr(self, "_wreq_client", None):
-            try:
-                import wreq
-            except ImportError:
-                logger.warning(
-                    "wreq 未安装（pip install wreq），抖音作品请求将使用 httpx 直连——"
-                    "Argus 网关会以 200 空响应体静默拒绝，作品列表将为空"
-                )
-                return None
-            jar = wreq.Jar()
-            for part in (self.cookie or "").split(";"):
-                k, _, v = part.strip().partition("=")
-                if k and v:
-                    try:
-                        jar.add(wreq.Cookie(name=k, value=v, domain="douyin.com", path="/"),
-                                "https://www.douyin.com")
-                    except Exception:
-                        pass
-            self._wreq_jar = jar
-            self._wreq_client = wreq.Client(emulation=wreq.Emulation.Chrome131, jar=jar)
-        return self._wreq_client
-
     async def get_user_works(self, user_id: str, cursor: int = 0, count: int = 20):
         """分页获取作品列表。cursor 为接口 max_cursor（时间戳语义），原样回传。"""
-        # 外部签名服务路径：Argus 网关（uifid+签名+TLS 指纹）下内置 a_bogus 直连已失效，
-        # 配置了签名服务就走它，由服务端完成对抗
+        # 配置了外部签名服务时优先走它（可选）；否则用内置签名经 httpx 直连
         if self._sign_api_url():
             return await self._fetch_user_works_via_api(user_id, cursor, count)
         works = []
@@ -593,19 +548,6 @@ class DouyinPlatform(BasePlatform):
             query, ws_headers = self._websign(signed)
             url = "https://www.douyin.com/aweme/v1/web/aweme/post/?" + query
 
-            # ttwid 缺失时先补（wreq jar 需要；Cookie 已含则跳过）
-            wreq_client = self._works_wreq_client()
-            if wreq_client is not None and not self._cookie_field_ci("ttwid"):
-                ttwid = await self._get_ttwid()
-                if ttwid:
-                    try:
-                        self._wreq_jar.add(
-                            wreq.Cookie(name="ttwid", value=ttwid, domain="douyin.com", path="/"),
-                            "https://www.douyin.com",
-                        )
-                    except Exception:
-                        pass
-
             works_headers = {
                 "Referer": "https://www.douyin.com/",
                 "Accept": "application/json, text/plain, */*",
@@ -618,40 +560,22 @@ class DouyinPlatform(BasePlatform):
                 "sec-fetch-dest": "empty",
                 **ws_headers,
             }
-            if wreq_client is not None:
-                # wreq: Chrome131 TLS 指纹（Argus 会静默拒绝 Python TLS——200 空响应体）
-                resp = await wreq_client.get(url, headers=works_headers)
-                status, text = resp.status, await resp.text()
-                if status != 200:
-                    logger.warning(f"抖音作品接口 HTTP {status}: {text[:150]}")
-                    raise classify_platform_error(
-                        f"抖音作品接口 HTTP {status}: {text}", status_code=status
-                    )
-                if not text:
-                    raise classify_platform_error(
-                        "抖音作品接口返回空响应体（游客身份的空信封或风控软拒绝："
-                        "作品订阅需要含 UIFID+sessionid 的登录态 Cookie）"
-                    )
-                data = json.loads(text)
-            else:
-                resp = await self.client.get(
-                    url, headers={**await self._works_headers(), **works_headers}
-                )
-                status, text = resp.status_code, resp.text
-                if status != 200:
-                    logger.warning(f"抖音作品接口 HTTP {status}: {(text or '')[:150]}")
-                    raise classify_platform_error(
-                        f"抖音作品接口 HTTP {status}: {text}", status_code=status
-                    )
-                data = resp.json()
-
-            # 200 但非 JSON / 空响应体：Argus 网关的软拒绝形态（签名/TLS 通过但
-            # 身份层被拦），如实分类上抛
-            if not text:
+            # 经平台自带的 httpx 客户端直连。不要改回 wreq：2026-11-27 实测，同一条已签名
+            # URL 经 httpx 能取到作品，经 wreq 则被服务端返回 200 空体（与 Cookie、节点无关）。
+            resp = await self.client.get(
+                url, headers={**await self._works_headers(), **works_headers}
+            )
+            status, text = resp.status_code, resp.text
+            if status != 200:
+                logger.warning(f"抖音作品接口 HTTP {status}: {(text or '')[:150]}")
                 raise classify_platform_error(
-                    "抖音作品接口返回空响应体（Argus 风控软拒绝："
-                    "请确认已在「系统设置」填写含 UIFID 的登录态 Cookie）"
+                    f"抖音作品接口 HTTP {status}: {text}", status_code=status
                 )
+
+            # 200 但空响应体 / 非 JSON：服务端没有按接口契约返回数据，如实上抛，
+            # 交给上层按退避策略重试
+            if not text:
+                raise classify_platform_error("抖音作品接口返回空响应体")
             try:
                 data = json.loads(text)
             except ValueError:

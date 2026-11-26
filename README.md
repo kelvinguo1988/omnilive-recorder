@@ -295,13 +295,13 @@ omnilive-recorder/
 
 ### 抖音作品订阅：Argus 签名（2026-11 起，已内置支持）
 
-抖音对作品/用户 Web API 上线了 **ArgusSecurityPlugin 网关**。一个请求要通过它，需要三样东西：
+抖音对作品/用户 Web API 上线了 **ArgusSecurityPlugin 网关**。一个请求要通过它，需要两样东西：
 
 | 要素 | 本项目处理方式 |
 |---|---|
 | `uifid`（设备指纹） | 从你配置的抖音 Cookie 中自动提取 |
 | `x-secsdk-web-signature` 签名 | **内置纯 Python 实现**（`vendor/websign.py`，移植自 DTK v5.1.11，Apache-2.0） |
-| Chrome TLS 指纹 | 使用 `wreq`（Rust 实现，Chrome 131 指纹）；缺失时回退 httpx 并告警 |
+| 传输层 | 直接用 `httpx`，无需模拟浏览器 TLS。曾引入 `wreq` 模拟 Chrome 指纹，但实测抖音服务端对其请求一律返回 200 空体（与 Cookie、出口节点无关），已于 2026-11 移除 |
 
 签名算法为 `md5(f"{uifid}_{timestamp}_{SALT}_{query}")`，参数顺序 `a_bogus → verifyFp → fp → uifid → timestamp → signature`。
 实测：正确签名 → HTTP 200 通过网关校验；坏签名/无签名 → 403 `Sign Invalid`。
@@ -322,9 +322,10 @@ omnilive-recorder/
 
 | 系统日志/界面显示 | 含义 | 处理 |
 |---|---|---|
-| 签名被拦（`Signature Not Found` / `Sign Invalid`） | 签名层问题 | 确认镜像含 `wreq`（`docker exec live-recorder python3 -c "import wreq"`）；缺则重建镜像 |
+| 签名被拦（`Signature Not Found` / `Sign Invalid`） | 签名层问题 | 升级到内置签名（`vendor/websign.py`）的版本；仍不行再考虑配置外部签名服务 |
 | Cookie 已失效（`Uifid Not Found`） | Cookie 缺 UIFID 或已过期 | 重新复制登录态 Cookie |
-| 拉取成功但 0 条 | 游客身份，无数据权限 | 配置登录态 Cookie |
+| 拉取成功但 0 条 | 该账号没有可见作品，或未配置登录态 Cookie | 先在浏览器打开该主播主页确认是否有作品，再检查 Cookie |
+| 返回空响应体 | 服务端没有返回数据（少见） | 系统会自动退避重试；持续出现再排查 |
 | 被限流 | 请求过密 | 无需操作，已自动退避 |
 
 > 历史方案说明：早期版本曾支持「外部签名服务」（`Douyin_TikTok_Download_API`，设置项 `douyin_sign_api_url`）。

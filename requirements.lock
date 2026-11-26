@@ -115,4 +115,3 @@ websockets==14.1
     # via
     #   -r /Users/sec-t/Downloads/直播录制/live-recorder/requirements.txt
     #   uvicorn
-wreq==0.13.0
